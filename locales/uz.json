@@ -1,0 +1,18 @@
+{
+    "start": "👋 Salom! Men Lyra botman.\n\n🔗 Link yuboring — video/audio yuklab beraman\n🎵 Qo'shiq nomi yozing — musiqa topaman\n🎤 Audio/video yuboring — Shazam orqali aniqlayman\n\n📸 Instagram, Pinterest, Twitter rasmlarini ham yuklab beraman.",
+    "downloading": "⏳ Yuklanmoqda...",
+    "uploading": "📤 Yuborilmoqda...",
+    "error": "❌ Xatolik yuz berdi. Qaytadan urinib ko'ring.",
+    "unsupported": "❌ Bu link qo'llab-quvvatlanmaydi.",
+    "file_too_large": "❌ Fayl juda katta (2 GB dan oshmasligi kerak).",
+    "rate_limit": "⏳ Biroz kuting, so'rovlar ko'p.",
+    "wait": "🔍 Qidirilmoqda...",
+    "no_results": "😕 Hech narsa topilmadi.",
+    "search_results": "🎵 Natijalar:",
+    "shazam_wait": "🎤 Aniqlanmoqda...",
+    "shazam_not_found": "😕 Qo'shiq aniqlanmadi.",
+    "choose_lang": "🌐 Tilni tanlang:",
+    "lang_changed": "✅ Til o'zgartirildi!",
+    "admin_only": "❌ Faqat adminlar uchun.",
+    "force_sub": "📢 Botdan foydalanish uchun kanalga qo'shiling:"
+}

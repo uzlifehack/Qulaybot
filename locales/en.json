@@ -1,0 +1,18 @@
+{
+    "start": "👋 Hi! I'm Lyra bot.\n\n🔗 Send a link — I'll download video/audio\n🎵 Type a song name — I'll find music\n🎤 Send audio/video — I'll recognize via Shazam\n\n📸 I also download photos from Instagram, Pinterest, Twitter.",
+    "downloading": "⏳ Downloading...",
+    "uploading": "📤 Uploading...",
+    "error": "❌ An error occurred. Please try again.",
+    "unsupported": "❌ This link is not supported.",
+    "file_too_large": "❌ File is too large (max 2 GB).",
+    "rate_limit": "⏳ Please wait a moment.",
+    "wait": "🔍 Searching...",
+    "no_results": "😕 Nothing found.",
+    "search_results": "🎵 Results:",
+    "shazam_wait": "🎤 Recognizing...",
+    "shazam_not_found": "😕 Song not recognized.",
+    "choose_lang": "🌐 Choose language:",
+    "lang_changed": "✅ Language changed!",
+    "admin_only": "❌ Admins only.",
+    "force_sub": "📢 Subscribe to channel to use the bot:"
+}

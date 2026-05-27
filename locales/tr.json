@@ -1,0 +1,22 @@
+{
+  "start": "Merhaba! Link gönderin — indireyim.\nMüzik için şarkı adını gönderin.",
+  "wait": "⏳ Lütfen bekleyin...",
+  "downloading": "⬇️ İndiriliyor...",
+  "uploading": "📤 Gönderiliyor...",
+  "done": "✅ Tamam!",
+  "error": "❌ Bir hata oluştu. Tekrar deneyin.",
+  "rate_limit": "⚠️ Çok hızlı. Biraz bekleyin.",
+  "unsupported": "❌ Bu link desteklenmiyor.",
+  "file_too_large": "❌ Dosya 2GB sınırını aşıyor.",
+  "lang_changed": "✅ Dil değiştirildi.",
+  "choose_lang": "Dil seçin:",
+  "admin_only": "❌ Yalnızca yöneticiler için.",
+  "stats": "📊 İstatistik:\n👥 Kullanıcılar: {total_users}\n⬇️ Toplam indirme: {total_downloads}\n📅 Bugün: {today_downloads}",
+  "broadcast_start": "📢 Mesaj gönderiliyor...",
+  "broadcast_done": "✅ {count} kullanıcıya gönderildi.",
+  "shazam_wait": "🎵 Tanınıyor...",
+  "shazam_found": "🎵 Bulundu:\n{title} — {artist}",
+  "shazam_not_found": "❌ Müzik tanınamadı.",
+  "search_results": "🎵 Sonuçlar:",
+  "no_results": "❌ Hiçbir şey bulunamadı."
+}

@@ -70,6 +70,12 @@ YDL_BASE = {
     "restrictfilenames": True,
     "overwrites": True,
     "http_headers": {"User-Agent": USER_AGENT},
+    # Matches the combo confirmed working in production (qulay_bot.py).
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["ios", "android", "web"],
+        }
+    },
 }
 
 # bestvideo*+bestaudio prefers a real merged video+audio pair; the plain

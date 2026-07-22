@@ -76,10 +76,15 @@ YTDL_BASE = {
             "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
         ),
     },
-    # No forced player_client: yt-dlp's own default is kept up to date
-    # upstream with every release. Pinning clients like "tv"/"ios" was
-    # observed to silently fall back to muxed, audio-less or oversized
-    # streams whenever that client's format set didn't match the video.
+    # Restored to the last known-working client combo. "tv"/"web_safari"/"mweb"
+    # and "no override" were both tried and regressed downloads (silent audio,
+    # oversized files, or outright failures) — this combo is the one that
+    # actually worked in production before.
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["ios", "android", "web"],
+        }
+    },
 }
 
 if Path(COOKIES_FILE).exists():

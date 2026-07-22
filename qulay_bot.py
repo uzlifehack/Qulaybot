@@ -704,7 +704,9 @@ def extract_video_id(url: str) -> Optional[str]:
 
 
 def extract_shorts_id(url: str) -> Optional[str]:
-    m = re.search(r"(?:youtube\.com/shorts/|youtu\.be/)([a-zA-Z0-9_-]{11})", url)
+    # Faqat rasmiy /shorts/ pathi Shorts hisoblanadi. youtu.be/XXX bu oddiy
+    # video uchun qisqartirilgan link — sifat menyusi kerak.
+    m = re.search(r"youtube\.com/shorts/([a-zA-Z0-9_-]{11})", url)
     return m.group(1) if m else None
 def extract_spotify_id(url: str) -> Optional[str]:
     m = re.search(r"open\.spotify\.com/track/([a-zA-Z0-9]+)", url)
@@ -1982,14 +1984,14 @@ async def handle_search(c: Client, m: Message, query: str, lang: str = "uz"):
 
 # ─── CALLBACKS ────────────────────────────────────────────────────────────────
 
-@app.on_callback_query(filters.regex(r"^yt:(\d+|audio):([a-zA-Z0-9_-]+)$"))
+@app.on_callback_query(filters.regex(r"^yt:(\d+|audio):([a-zA-Z0-9_-]{11})$"))
 @catch_errors
 async def youtube_quality_cb(c: Client, cb: CallbackQuery):
     quality = cb.matches[0].group(1)
     vid     = cb.matches[0].group(2)
-    url     = _youtube_url_cache.get(vid, None)
-    if not url:
-        await cb.answer("❌ Eski so'rov", show_alert=True); return
+    # URL vid'dan qayta quriladi — cachega yoki bot restartga bog'liq emas.
+    # (Eski _youtube_url_cache orqali ba'zi tugmalar "Eski so'rov" chiqarardi.)
+    url     = _youtube_url_cache.get(vid) or f"https://www.youtube.com/watch?v={vid}"
     uid  = cb.from_user.id
     lang = await asyncio.get_event_loop().run_in_executor(None, db_get_lang, uid)
     sem  = await get_semaphore(uid)
@@ -2002,11 +2004,18 @@ async def youtube_quality_cb(c: Client, cb: CallbackQuery):
     chat_id = cb.message.chat.id
     cap = t(lang,"caption")
     try:
-        await c.send_chat_action(chat_id, ChatAction.UPLOAD_VIDEO)
-        status_msg = await cb.message.reply_text("⏳", quote=True)
+        await c.send_chat_action(chat_id,
+            ChatAction.UPLOAD_AUDIO if quality == "audio" else ChatAction.UPLOAD_VIDEO)
+        label = "🎵 Audio" if quality == "audio" else f"🎬 {quality}p"
+        # Tanlangan sifatni asosiy menyuda ko'rsatib qo'yamiz — takroriy bosishlarga imkon bermaydi
+        try: await cb.message.edit_text(f"{label} — ⏳ yuklanmoqda...")
+        except Exception: pass
+        status_msg = await cb.message.reply_text(f"⏳ {label}", quote=True)
         result = await download_video(url, tmp, quality if quality != "audio" else "audio",
                                       client=c, chat_id=chat_id, status_msg=status_msg)
         try: await status_msg.delete()
+        except Exception: pass
+        try: await cb.message.delete()
         except Exception: pass
         if result:
             vpath, *_ = result

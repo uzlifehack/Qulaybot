@@ -90,10 +90,12 @@ YTDL_BASE = {
 if Path(COOKIES_FILE).exists():
     YTDL_BASE["cookiefile"] = COOKIES_FILE
 
-if not shutil.which("ffmpeg"):
+_missing_bins = [b for b in ("ffmpeg", "ffprobe", "gallery-dl") if not shutil.which(b)]
+if _missing_bins:
     logging.warning(
-        "ffmpeg not found on PATH — video/audio merging and mp3 extraction "
-        "will fail or silently downgrade quality."
+        "Missing external tools on PATH: %s — install with: "
+        "apt install -y ffmpeg  &&  pip install -U gallery-dl yt-dlp",
+        ", ".join(_missing_bins),
     )
 
 def _make_progress_hook(callback):
@@ -565,14 +567,18 @@ async def cache_to_channel(client, file_path: str, media_type: str, **kwargs) ->
         logger.error(f"cache_to_channel: {e}")
     return None, None
 
-async def bg_cache(client, file_path, media_type, url, loop, **kwargs):
-    """Background da kanalga yuborish va DB ga saqlash"""
+async def bg_cache(client, file_path, media_type, url, loop=None, **kwargs):
+    """Background da kanalga yuborish va DB ga saqlash.
+
+    loop argument saqlanadi backward-compat uchun, lekin ishlatilmaydi —
+    running loop coroutine ichida olinadi."""
     try:
         await asyncio.sleep(1)
         kwargs.pop("thumb", None)
         fid, ftype = await cache_to_channel(client, file_path, media_type, **kwargs)
         if fid:
-            await loop.run_in_executor(None, lambda: db_set_url_cache(url, fid, ftype or media_type))
+            running = asyncio.get_running_loop()
+            await running.run_in_executor(None, lambda: db_set_url_cache(url, fid, ftype or media_type))
     except Exception as e:
         logger.error(f"bg_cache: {e}")
 
@@ -1314,29 +1320,83 @@ async def get_spotify_track_info(track_id: str) -> Optional[Dict]:
 
 # ─── SHAZAM (serverda to'g'ridan) ─────────────────────────────────────────────
 
+_shazam_instance = None
+_shazam_method_name = None
+
+def _get_shazam():
+    """Cached Shazam client + resolved method name across shazamio versions.
+
+    shazamio renamed `recognize_song()` → `recognize()` around 0.5.0. Trying
+    both attributes lets us work on either release without a hard pin.
+    """
+    global _shazam_instance, _shazam_method_name
+    if _shazam_instance is None:
+        from shazamio import Shazam
+        _shazam_instance = Shazam()
+        for name in ("recognize", "recognize_song"):
+            if hasattr(_shazam_instance, name):
+                _shazam_method_name = name
+                break
+        if _shazam_method_name is None:
+            raise AttributeError(
+                "shazamio: neither .recognize nor .recognize_song exists; "
+                "unsupported shazamio version"
+            )
+        logger.info(f"shazamio ready — using method: {_shazam_method_name}")
+    return _shazam_instance, _shazam_method_name
+
 async def shazam_audio(audio_path: Path) -> Optional[Dict]:
     try:
-        from shazamio import Shazam
-        shazam = Shazam()
-        out    = await shazam.recognize(str(audio_path))
-        track  = out.get("track", {})
+        if not audio_path or not Path(audio_path).exists():
+            logger.warning(f"shazam: audio file missing: {audio_path}")
+            return None
+        size = Path(audio_path).stat().st_size
+        if size < 1024:
+            logger.warning(f"shazam: audio too small ({size} bytes) — likely empty")
+            return None
+        shazam, method_name = _get_shazam()
+        method = getattr(shazam, method_name)
+        out    = await asyncio.wait_for(method(str(audio_path)), timeout=25)
+        if not out:
+            logger.warning("shazam: empty response")
+            return None
+        track  = (out or {}).get("track") or {}
         title  = track.get("title", "")
         artist = track.get("subtitle", "")
         if title:
             return {"title": title, "artist": artist}
+        logger.info("shazam: no match for this clip")
+    except asyncio.TimeoutError:
+        logger.error("shazam: timeout after 25s")
     except Exception as e:
-        logger.error(f"shazam: {e}")
+        logger.error(f"shazam: {type(e).__name__}: {e}")
     return None
 
 def extract_audio_from_video(video_path: Path, out_path: Path, seconds: int = 25) -> Optional[Path]:
-    try:
-        cmd = ["ffmpeg","-i",str(video_path),"-t",str(seconds),
-               "-q:a","0","-map","a?",str(out_path),"-y"]
-        subprocess.run(cmd, check=True, capture_output=True, timeout=600)
-        return out_path if out_path.exists() and out_path.stat().st_size > 0 else None
-    except Exception as e:
-        logger.error(f"ffmpeg extract: {e}")
+    if not shutil.which("ffmpeg"):
+        logger.error("ffmpeg not installed — cannot extract audio. Run: apt install -y ffmpeg")
         return None
+    if not Path(video_path).exists():
+        logger.error(f"extract audio: source missing: {video_path}")
+        return None
+    try:
+        # -map 0:a:0 requires an audio stream — fails loudly (better than -map a?
+        # which succeeds silently on video-only inputs and produces an empty file).
+        cmd = ["ffmpeg","-i",str(video_path),"-t",str(seconds),
+               "-vn","-q:a","0","-map","0:a:0",str(out_path),"-y"]
+        r = subprocess.run(cmd, capture_output=True, timeout=600)
+        if r.returncode != 0:
+            err = (r.stderr or b"").decode("utf-8", "replace")[-500:]
+            logger.error(f"ffmpeg extract rc={r.returncode}: {err}")
+            return None
+        if out_path.exists() and out_path.stat().st_size > 0:
+            return out_path
+        logger.error(f"ffmpeg extract: empty output: {out_path}")
+    except subprocess.TimeoutExpired:
+        logger.error("ffmpeg extract: timeout")
+    except Exception as e:
+        logger.error(f"ffmpeg extract: {type(e).__name__}: {e}")
+    return None
 
 # ─── YOUTUBE QUALITY KB ───────────────────────────────────────────────────────
 
@@ -2267,7 +2327,7 @@ def _admin_kb():
 @app.on_message(filters.command("getcode") & admin_f)
 @catch_errors
 async def getcode_cmd(c: Client, m: Message):
-    await m.reply_document("/root/bot/bot_fixed.py", caption="bot_fixed.py", quote=True)
+    await m.reply_document(__file__, caption=Path(__file__).name, quote=True)
 
 @app.on_message(filters.command("admin") & admin_f)
 @catch_errors
@@ -2487,13 +2547,30 @@ async def setchannel_cmd(c: Client, m: Message):
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
+_stop_event: Optional[asyncio.Event] = None
+
 async def main():
+    global _stop_event
+    _stop_event = asyncio.Event()
     await temp_cleanup()
     safe_task(cache_cleanup_loop(), "cleanup_loop")
     safe_task(temp_cleanup_loop(), "temp_cleanup_loop")
     await app.start()
-    print("🤖 Lyra ishga tushdi")
-    await asyncio.get_event_loop().create_future()
+    me = await app.get_me()
+    logger.info(f"🤖 @{me.username} ishga tushdi (id={me.id})")
+    print(f"🤖 @{me.username} ishga tushdi")
+    for admin_id in ADMIN_IDS:
+        try: await app.send_message(admin_id, f"✅ @{me.username} ishga tushdi")
+        except Exception: pass
+    try:
+        await _stop_event.wait()
+    finally:
+        logger.info("Bot to'xtatilmoqda...")
+        try: await app.stop()
+        except Exception: pass
 
 if __name__ == "__main__":
-    app.run(main())
+    try:
+        app.run(main())
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt — chiqilmoqda")

@@ -1,9 +1,9 @@
 import asyncio, os, json, time, logging, traceback
 from pathlib import Path
 from pyrogram import Client, filters
-from pyrogram.types import Message, InputMediaPhoto
+from pyrogram.types import Message, InputMediaPhoto, InputMediaVideo
 from pyrogram.errors import FloodWait
-from services.image_service import download_images, cleanup_dir, get_parent_dir
+from services.image_service import download_media, cleanup_dir, get_parent_dir, is_video
 from db.crud import get_user, upsert_user, inc_stat
 from cache.redis_client import get_redis
 from config import RATE_LIMIT, BOT_ID
@@ -30,7 +30,7 @@ def register(app):
         st = await msg.reply_text("⏳ Yuklanmoqda...")
         od = None
         try:
-            files = await asyncio.wait_for(download_images(url), timeout=90)
+            files = await asyncio.wait_for(download_media(url), timeout=95)
             if not files:
                 try: await st.edit_text(t(lang,"error"))
                 except: pass
@@ -38,9 +38,12 @@ def register(app):
             od = get_parent_dir(files[0])
             try: await st.edit_text("📤 Yuborilmoqda...")
             except: pass
-            if len(files) == 1: await client.send_photo(chat_id=uid, photo=files[0])
+            if len(files) == 1:
+                f = files[0]
+                if is_video(f): await client.send_video(chat_id=uid, video=f)
+                else: await client.send_photo(chat_id=uid, photo=f)
             else:
-                mg = [InputMediaPhoto(f) for f in files]
+                mg = [InputMediaVideo(f) if is_video(f) else InputMediaPhoto(f) for f in files]
                 for i in range(0, len(mg), 10):
                     try: await client.send_media_group(chat_id=uid, media=mg[i:i+10])
                     except FloodWait as e: await asyncio.sleep(e.value+1)

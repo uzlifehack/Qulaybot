@@ -70,9 +70,17 @@ YTDL_BASE = {
     "nocheckcertificate":           True,
     "geo_bypass":                   True,
     "geo_bypass_country":           "US",
+    "http_headers": {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        ),
+    },
+    # Modern, resilient client mix — the legacy "android" client is now
+    # heavily throttled by YouTube and was a frequent cause of failures.
     "extractor_args": {
         "youtube": {
-            "player_client": ["ios", "android", "web"],
+            "player_client": ["tv", "ios", "web_safari", "mweb"],
         }
     },
 }

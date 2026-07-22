@@ -6,13 +6,17 @@ Optimised for speed and resilience:
     takes effect without restarting the bot;
   * a bounded, dedicated thread pool keeps blocking yt-dlp work off the
     event loop without exhausting the default executor;
-  * robust format fallbacks + a modern set of YouTube player clients keep
-    downloads working even when one client gets throttled;
+  * YouTube's player_client is left at yt-dlp's own default (updated
+    upstream with every release) instead of a hardcoded list — pinning
+    clients like "tv"/"ios" has been observed to silently fall back to
+    muxed, audio-less or oversized streams when that client's format set
+    doesn't line up with the video;
   * temp files are always cleaned up on failure.
 """
 
 import asyncio
 import os
+import shutil
 import tempfile
 import logging
 from pathlib import Path
@@ -27,6 +31,12 @@ logger = logging.getLogger(__name__)
 
 COOKIES_FILE = str(Path(__file__).parent.parent / "cookies.txt")
 TMP_DIR = os.getenv("DL_TMP_DIR", "/tmp")
+
+if not shutil.which("ffmpeg"):
+    logger.warning(
+        "ffmpeg not found on PATH — video/audio merging and mp3 extraction "
+        "will fail or silently downgrade quality."
+    )
 
 # A realistic desktop UA reduces "bot" detection on several sites.
 USER_AGENT = (
@@ -60,30 +70,16 @@ YDL_BASE = {
     "restrictfilenames": True,
     "overwrites": True,
     "http_headers": {"User-Agent": USER_AGENT},
-    # Modern, resilient client mix. tv/web_safari avoid most SABR throttling;
-    # ios/mweb are lightweight fallbacks that keep working when one is blocked.
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["tv", "ios", "web_safari", "mweb"],
-        }
-    },
 }
 
-# Progressive format fallbacks: try a merged 1080p mp4 first (fast + Telegram
-# friendly), then any best merge, then a single progressive stream.
-_VIDEO_FORMATS = (
-    "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
-    "bestvideo[height<=1080]+bestaudio/"
-    "best[height<=1080]/best"
-)
+# bestvideo*+bestaudio prefers a real merged video+audio pair; the plain
+# "best" fallback only kicks in if no separate streams exist at all.
+_VIDEO_FORMATS = "bestvideo*+bestaudio/best"
 
 
 def _base_opts() -> dict:
     """Fresh copy of the base options with current cookies attached."""
     opts = dict(YDL_BASE)
-    opts["extractor_args"] = {
-        "youtube": {"player_client": list(YDL_BASE["extractor_args"]["youtube"]["player_client"])}
-    }
     if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 0:
         opts["cookiefile"] = COOKIES_FILE
     return opts

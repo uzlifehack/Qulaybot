@@ -76,17 +76,20 @@ YTDL_BASE = {
             "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
         ),
     },
-    # Modern, resilient client mix — the legacy "android" client is now
-    # heavily throttled by YouTube and was a frequent cause of failures.
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["tv", "ios", "web_safari", "mweb"],
-        }
-    },
+    # No forced player_client: yt-dlp's own default is kept up to date
+    # upstream with every release. Pinning clients like "tv"/"ios" was
+    # observed to silently fall back to muxed, audio-less or oversized
+    # streams whenever that client's format set didn't match the video.
 }
 
 if Path(COOKIES_FILE).exists():
     YTDL_BASE["cookiefile"] = COOKIES_FILE
+
+if not shutil.which("ffmpeg"):
+    logging.warning(
+        "ffmpeg not found on PATH — video/audio merging and mp3 extraction "
+        "will fail or silently downgrade quality."
+    )
 
 def _make_progress_hook(callback):
     """yt-dlp progress hook - foizni qaytaradi"""

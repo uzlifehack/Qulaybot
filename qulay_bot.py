@@ -733,6 +733,51 @@ def _get_audio_duration(path) -> int:
     except Exception: pass
     return 0
 
+def _video_has_audio(path: Path) -> bool:
+    """Return True if the file has any audio stream."""
+    try:
+        r = subprocess.run(
+            ["ffprobe","-v","quiet","-select_streams","a",
+             "-show_entries","stream=index","-print_format","json",str(path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        streams = json.loads(r.stdout or "{}").get("streams", [])
+        return bool(streams)
+    except Exception:
+        # If we can't probe, assume audio is present so we don't destroy the file.
+        return True
+
+def ensure_video_has_audio(path: Path) -> Path:
+    """If the video has no audio track, remux it with a silent AAC stream.
+
+    Telegram auto-detects video-without-audio as an animation (GIF), which is
+    why some Instagram reels arrive as GIFs. Adding a silent audio track
+    forces Telegram to send them as proper videos.
+    """
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        return path
+    if _video_has_audio(path):
+        return path
+    fixed = path.with_name(path.stem + "_wav" + path.suffix)
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-i", str(path),
+             "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+             "-c:v", "copy", "-c:a", "aac", "-b:a", "64k",
+             "-shortest", "-movflags", "+faststart",
+             str(fixed), "-y"],
+            capture_output=True, timeout=90,
+        )
+        if r.returncode == 0 and fixed.exists() and fixed.stat().st_size > 0:
+            try: path.unlink()
+            except Exception: pass
+            return fixed
+        err = (r.stderr or b"").decode("utf-8", "replace")[-300:]
+        logger.warning(f"ensure_video_has_audio failed rc={r.returncode}: {err}")
+    except Exception as e:
+        logger.warning(f"ensure_video_has_audio: {type(e).__name__}: {e}")
+    return path
+
 def _get_video_meta(path: Path) -> Tuple[int, int, int, Optional[str]]:
     w, h, dur, thumb = 0, 0, 0, None
     try:
@@ -761,6 +806,10 @@ def _get_video_meta(path: Path) -> Tuple[int, int, int, Optional[str]]:
 def _save_media(uid: int, src: Path, media_type: str, title: str = "") -> Tuple[str, Path]:
     media_dir = get_user_media_dir(uid)
     prefix = "audio" if media_type == "audio" else "video"
+    # Jim videolarni Telegram GIF sifatida qabul qiladi — audio yo'q bo'lsa
+    # jimjit AAC track qo'shamiz. Instagram Reels muammosining asosiy sababi.
+    if media_type == "video":
+        src = ensure_video_has_audio(src)
     final  = media_dir / f"{prefix}_{uuid.uuid4().hex[:8]}{src.suffix}"
     shutil.move(str(src), str(final))
     media_id = uuid.uuid4().hex[:8]
@@ -1017,32 +1066,64 @@ def _download_video_sync(url: str, out_dir: Path,
         if progress_cb:
             opts["progress_hooks"] = [_make_progress_hook(progress_cb)]
 
-        # ── 1. YT-DLP (ASOSIY) ───────────────────────────────────────
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                if not info: raise Exception("no info")
-                fname = ydl.prepare_filename(info)
-                if fname and not fname.endswith('.mp4') and quality != "audio":
-                    fname = _re.sub(r'\.[^.]+$', '.mp4', fname)
-                if not os.path.exists(fname):
-                    files = list(out_dir.glob("*"))
-                    fname = str(max(files, key=os.path.getctime)) if files else None
-                if not fname: raise Exception("no file")
-                site_map = {"youtube": "YouTube", "tiktok": "TikTok",
-                            "instagram": "Instagram", "twitter": "Twitter",
-                            "facebook": "Facebook", "vimeo": "Vimeo"}
-                extractor = (info.get("extractor_key") or "").lower()
-                site  = next((v for k, v in site_map.items() if k in extractor),
-                             info.get("webpage_url_domain", "Video"))
-                title = info.get("title", "") or ""
-                return Path(fname), site, title
-        except Exception as e:
-            err = str(e).lower()
-            logger.warning(f"yt-dlp failed: {e}")
-            # yt-dlp xato bo'lsa Invidious fallback ga o'tamiz
-            if not is_youtube:
-                raise
+        # ── 1. YT-DLP: bir necha client kombinatsiyalari bilan urinib ko'radi.
+        # Facebook, Instagram va YouTube da bitta client ishlamasa boshqasi
+        # yordam berishi mumkin — bot check, PoToken, SABR muammolari uchun.
+        attempts = []
+        if is_youtube:
+            attempts = [
+                ["ios", "android", "web"],
+                ["tv_embedded", "web_safari", "mweb"],
+                ["android_creator", "web"],
+            ]
+        elif "facebook.com" in url or "fb.watch" in url:
+            attempts = [None]  # default clients, no youtube-specific args
+        else:
+            attempts = [None]
+
+        last_err = None
+        for clients in attempts:
+            try:
+                attempt_opts = dict(opts)
+                if clients is not None:
+                    attempt_opts["extractor_args"] = {"youtube": {"player_client": clients}}
+                with yt_dlp.YoutubeDL(attempt_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    if not info: raise Exception("no info")
+                    fname = ydl.prepare_filename(info)
+                    if fname and not fname.endswith('.mp4') and quality != "audio":
+                        fname = _re.sub(r'\.[^.]+$', '.mp4', fname)
+                    if not os.path.exists(fname):
+                        files = list(out_dir.glob("*"))
+                        fname = str(max(files, key=os.path.getctime)) if files else None
+                    if not fname: raise Exception("no file")
+                    site_map = {"youtube": "YouTube", "tiktok": "TikTok",
+                                "instagram": "Instagram", "twitter": "Twitter",
+                                "facebook": "Facebook", "vimeo": "Vimeo"}
+                    extractor = (info.get("extractor_key") or "").lower()
+                    site  = next((v for k, v in site_map.items() if k in extractor),
+                                 info.get("webpage_url_domain", "Video"))
+                    title = info.get("title", "") or ""
+                    return Path(fname), site, title
+            except Exception as e:
+                last_err = e
+                err_low = str(e).lower()
+                clients_label = ",".join(clients) if clients else "default"
+                # Bot-check xatolarini alohida belgilaymiz — bu odatda cookies muddati o'tganini bildiradi.
+                if "sign in" in err_low or "confirm you" in err_low or "bot" in err_low:
+                    logger.error(f"yt-dlp [{clients_label}]: BOT CHECK — cookies expired? {e}")
+                else:
+                    logger.warning(f"yt-dlp [{clients_label}] failed: {e}")
+                # Faqat yt-dlp bot-check xatosi bo'lsa keyingi client'ni sinaymiz.
+                # Boshqa xato (unsupported url, network) bo'lsa erta chiqamiz.
+                if not is_youtube:
+                    break
+
+        # yt-dlp muvaffaqiyatsiz — YouTube uchun Invidious fallback
+        if not is_youtube:
+            if last_err:
+                logger.error(f"non-youtube dl_fail: {last_err}")
+            return None
 
         # ── 2. INVIDIOUS FALLBACK (faqat YouTube) ────────────────────
         vid_id = extract_video_id(url)
@@ -1198,7 +1279,12 @@ async def download_tiktok_slideshow(url: str, out_dir: Path) -> Optional[dict]:
 
 # ─── GALLERY-DL ───────────────────────────────────────────────────────────────
 
-GALLERY_SKIP_DOMAINS = ["imdb.com", "ok.ru", "odnoklassniki.ru"]
+# gallery-dl bu domenlarni yaxshi ishlab bermaydi — yt-dlp'ga o'tkazamiz.
+GALLERY_SKIP_DOMAINS = [
+    "imdb.com", "ok.ru", "odnoklassniki.ru",
+    "facebook.com", "fb.watch", "fb.com",
+    "youtube.com", "youtu.be",
+]
 
 async def download_gallery(url: str, out_dir: Path, client=None, chat_id=None,
                            original_msg=None, lang="uz") -> bool:
@@ -1864,6 +1950,29 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
                         _update_file_id(media_id, msg)
                 else:
                     await m.reply_text(t(lang,"dl_fail"), quote=True)
+            return
+
+        # Facebook — alohida branch, chunki gallery-dl uni yaxshi ishlab bermaydi
+        # va u fb-dan aniq video sifatida yuklab olishni istaydi.
+        if "facebook.com" in url or "fb.watch" in url or "fb.com" in url:
+            action_task = asyncio.create_task(keep_action(c, chat_id, ChatAction.UPLOAD_VIDEO, stop_action))
+            # Mobile Facebook URL'larini normal ga aylantiramiz — yt-dlp shu bilan yaxshiroq ishlaydi.
+            fb_url = url.replace("m.facebook.com", "www.facebook.com") \
+                        .replace("web.facebook.com", "www.facebook.com")
+            result = await download_video(fb_url, tmp)
+            if result:
+                vpath, _, title = result
+                media_id, final = _save_media(uid, vpath, "video", title)
+                w, h, dur, thumb = _get_video_meta(final)
+                msg = await m.reply_video(str(final), caption=cap,
+                    supports_streaming=True, width=w, height=h, duration=dur,
+                    thumb=thumb, reply_markup=_share_kb(media_id, lang), quote=True)
+                _update_file_id(media_id, msg)
+                _set_url_cache(url, media_id, "video")
+                safe_task(bg_cache(c, str(final), "video", url, loop, caption=cap, supports_streaming=True))
+                await loop.run_in_executor(None, lambda: db_add_download(uid, url, "Facebook", "ok"))
+            else:
+                await m.reply_text(t(lang,"dl_fail"), quote=True)
             return
 
         # Instagram

@@ -78,9 +78,10 @@ YDL_BASE = {
     },
 }
 
-# bestvideo*+bestaudio prefers a real merged video+audio pair; the plain
-# "best" fallback only kicks in if no separate streams exist at all.
-_VIDEO_FORMATS = "bestvideo*+bestaudio/best"
+# H.264 native format: compatible with all devices and Telegram.
+# format_sort ensures h264 is preferred over AV1/VP9 at the best resolution.
+_VIDEO_FORMATS = "bv*[vcodec^=avc]+ba[ext=m4a]/b[ext=mp4]/b"
+_VIDEO_FORMAT_SORT = ["vcodec:h264", "fps", "res", "acodec:m4a"]
 
 
 def _base_opts() -> dict:
@@ -95,6 +96,7 @@ def _download_video_sync(url: str, out_path: str) -> str:
     opts = {
         **_base_opts(),
         "format": _VIDEO_FORMATS,
+        "format_sort": _VIDEO_FORMAT_SORT,
         "merge_output_format": "mp4",
         "outtmpl": out_path,
         "postprocessors": [

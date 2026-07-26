@@ -1045,17 +1045,24 @@ def _download_video_sync(url: str, out_dir: Path,
         # merge_output_format=mp4 baribir ffmpeg orqali chiqishni mp4 qiladi.
         if is_youtube:
             if is_shorts:
-                fmt = "bestvideo+bestaudio/best"
+                fmt = "bv*[vcodec^=avc]+ba[ext=m4a]/b[ext=mp4]/b"
+                fmt_sort = None
             elif quality and quality != "audio":
-                fmt = (f"bestvideo[height<={quality}]+bestaudio/"
-                       f"best[height<={quality}]/"
-                       f"bestvideo+bestaudio/best")
+                fmt = (f"bv*[vcodec^=avc][height<={quality}]+ba[ext=m4a]/"
+                       f"bv*[height<={quality}]+ba/"
+                       f"b[height<={quality}]/"
+                       f"bv*[vcodec^=avc]+ba[ext=m4a]/b")
+                fmt_sort = None
             elif quality == "audio":
                 fmt = "bestaudio/best"
+                fmt_sort = None
             else:
-                fmt = "bestvideo+bestaudio/best"
+                # H.264 preferred: compatible with all devices and Telegram
+                fmt = "bv*[vcodec^=avc]+ba[ext=m4a]/b[ext=mp4]/b"
+                fmt_sort = ["vcodec:h264", "fps", "res", "acodec:m4a"]
         else:
             fmt = "bestvideo+bestaudio/best"
+            fmt_sort = None
 
         opts = {
             **YTDL_BASE,
@@ -1064,6 +1071,8 @@ def _download_video_sync(url: str, out_dir: Path,
             "merge_output_format": "mp4",
             "ignoreerrors": False,
         }
+        if fmt_sort:
+            opts["format_sort"] = fmt_sort
         if quality == "audio":
             opts["postprocessors"] = [{"key": "FFmpegExtractAudio",
                                         "preferredcodec": "mp3", "preferredquality": "192"}]

@@ -76,13 +76,9 @@ YTDL_BASE = {
             "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
         ),
     },
-    # Restored to the last known-working client combo. "tv"/"web_safari"/"mweb"
-    # and "no override" were both tried and regressed downloads (silent audio,
-    # oversized files, or outright failures) — this combo is the one that
-    # actually worked in production before.
     "extractor_args": {
         "youtube": {
-            "player_client": ["ios", "android", "web"],
+            "player_client": ["web", "web_safari"],
         }
     },
 }
@@ -1044,21 +1040,14 @@ def _download_video_sync(url: str, out_dir: Path,
         # (vp9/av1) va yt-dlp eng past progressive'ga (144p/360p) tushib qolardi.
         # merge_output_format=mp4 baribir ffmpeg orqali chiqishni mp4 qiladi.
         if is_youtube:
-            if is_shorts:
-                fmt = "bv*[vcodec^=avc]+ba[ext=m4a]/b[ext=mp4]/b"
-                fmt_sort = None
-            elif quality and quality != "audio":
-                fmt = (f"bv*[vcodec^=avc][height<={quality}]+ba[ext=m4a]/"
-                       f"bv*[height<={quality}]+ba/"
-                       f"b[height<={quality}]/"
-                       f"bv*[vcodec^=avc]+ba[ext=m4a]/b")
-                fmt_sort = None
-            elif quality == "audio":
+            if quality == "audio":
                 fmt = "bestaudio/best"
-                fmt_sort = None
+                fmt_sort = ["acodec:m4a"]
+            elif quality and quality != "audio":
+                fmt = f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/bestvideo+bestaudio/best"
+                fmt_sort = ["vcodec:h264", "fps", "res", "acodec:m4a"]
             else:
-                # H.264 preferred: compatible with all devices and Telegram
-                fmt = "bv*[vcodec^=avc]+ba[ext=m4a]/b[ext=mp4]/b"
+                fmt = "bestvideo+bestaudio/best"
                 fmt_sort = ["vcodec:h264", "fps", "res", "acodec:m4a"]
         else:
             fmt = "bestvideo+bestaudio/best"
@@ -1084,14 +1073,12 @@ def _download_video_sync(url: str, out_dir: Path,
         # yordam berishi mumkin — bot check, PoToken, SABR muammolari uchun.
         attempts = []
         if is_youtube:
-            # Tartib muhim: HD sifat beradiganlar oldinda.
-            #  * tv_embedded — PoTokensiz ham 1080p qaytaradi, cookie shart emas.
-            #  * web / web_safari — cookie bilan HD; PoTokensiz cheklovga uchramaydi.
-            #  * ios / android — PoTokensiz faqat 144p/360p qaytaradi. Faqat oxirgi urinish.
+            # Cookie bilan web client HD sifat beradi.
+            # ios/android PoTokensiz faqat 360p max qaytaradi — ishlatmaymiz.
             attempts = [
-                ["tv_embedded", "web_safari", "web"],
-                ["mweb", "web"],
-                ["ios", "android"],
+                ["web", "web_safari"],
+                ["tv_embedded", "web"],
+                ["mweb"],
             ]
         elif "facebook.com" in url or "fb.watch" in url:
             attempts = [None]  # default clients, no youtube-specific args

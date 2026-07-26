@@ -78,9 +78,7 @@ YDL_BASE = {
     },
 }
 
-# H.264 native format: compatible with all devices and Telegram.
-# format_sort ensures h264 is preferred over AV1/VP9 at the best resolution.
-_VIDEO_FORMATS = "bv*[vcodec^=avc]+ba[ext=m4a]/b[ext=mp4]/b"
+_VIDEO_FORMATS = "bestvideo+bestaudio/best"
 _VIDEO_FORMAT_SORT = ["vcodec:h264", "fps", "res", "acodec:m4a"]
 
 

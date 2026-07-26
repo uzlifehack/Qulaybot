@@ -1040,18 +1040,22 @@ def _download_video_sync(url: str, out_dir: Path,
         is_shorts  = "youtube.com/shorts/" in url
 
         # ── FORMAT STRING ────────────────────────────────────────────
+        # [ext=mp4] majburiy shart oldin — ba'zi videolarda mp4 stream yo'q edi
+        # (vp9/av1) va yt-dlp eng past progressive'ga (144p/360p) tushib qolardi.
+        # merge_output_format=mp4 baribir ffmpeg orqali chiqishni mp4 qiladi.
         if is_youtube:
             if is_shorts:
-                fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+                fmt = "bestvideo+bestaudio/best"
             elif quality and quality != "audio":
-                fmt = (f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]"
-                       f"/bestvideo[height<={quality}]+bestaudio/best")
+                fmt = (f"bestvideo[height<={quality}]+bestaudio/"
+                       f"best[height<={quality}]/"
+                       f"bestvideo+bestaudio/best")
             elif quality == "audio":
-                fmt = "bestaudio[ext=m4a]/bestaudio/best"
+                fmt = "bestaudio/best"
             else:
-                fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+                fmt = "bestvideo+bestaudio/best"
         else:
-            fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+            fmt = "bestvideo+bestaudio/best"
 
         opts = {
             **YTDL_BASE,
@@ -1071,10 +1075,14 @@ def _download_video_sync(url: str, out_dir: Path,
         # yordam berishi mumkin — bot check, PoToken, SABR muammolari uchun.
         attempts = []
         if is_youtube:
+            # Tartib muhim: HD sifat beradiganlar oldinda.
+            #  * tv_embedded — PoTokensiz ham 1080p qaytaradi, cookie shart emas.
+            #  * web / web_safari — cookie bilan HD; PoTokensiz cheklovga uchramaydi.
+            #  * ios / android — PoTokensiz faqat 144p/360p qaytaradi. Faqat oxirgi urinish.
             attempts = [
-                ["ios", "android", "web"],
-                ["tv_embedded", "web_safari", "mweb"],
-                ["android_creator", "web"],
+                ["tv_embedded", "web_safari", "web"],
+                ["mweb", "web"],
+                ["ios", "android"],
             ]
         elif "facebook.com" in url or "fb.watch" in url:
             attempts = [None]  # default clients, no youtube-specific args
@@ -1143,33 +1151,58 @@ def _download_video_sync(url: str, out_dir: Path,
 
                 video_url = audio_url = None
 
+                q_int = int(quality) if (quality and quality.isdigit()) else None
+
+                def _lbl_height(lbl: str) -> int:
+                    m = re.search(r"(\d+)p", lbl or "")
+                    return int(m.group(1)) if m else 0
+
                 if quality and quality != "audio":
-                    # Avval progressive (birlashgan) stream qidirish
-                    for s in prog_streams:
-                        if str(quality) in s.get("qualityLabel", "") and s.get("url"):
-                            video_url = s["url"]; break
-                    # Topilmasa eng yuqori progressive
+                    # AVVAL adaptive video stream (HD 1080p+ shu yerda),
+                    # KEYIN progressive (max 720p) fallback sifatida.
+                    video_candidates = [
+                        s for s in adap_streams
+                        if "video" in s.get("type", "") and s.get("url")
+                    ]
+                    video_candidates.sort(key=lambda s: _lbl_height(s.get("qualityLabel", "")), reverse=True)
+                    if q_int:
+                        capped = [s for s in video_candidates if _lbl_height(s.get("qualityLabel","")) <= q_int]
+                        if capped:
+                            video_url = capped[0]["url"]
+                    if not video_url and video_candidates:
+                        video_url = video_candidates[0]["url"]
+                    # Adaptive video tanlangan bo'lsa — alohida audio ham kerak
+                    if video_url:
+                        audio_candidates = [s for s in adap_streams if "audio" in s.get("type","") and s.get("url")]
+                        audio_candidates.sort(key=lambda s: s.get("bitrate", 0), reverse=True)
+                        if audio_candidates:
+                            audio_url = audio_candidates[0]["url"]
+                    # Adaptive umuman yo'q bo'lsa — progressive'ga qaytamiz
+                    if not video_url:
+                        prog_sorted = sorted(prog_streams,
+                            key=lambda s: _lbl_height(s.get("qualityLabel","")), reverse=True)
+                        for s in prog_sorted:
+                            if s.get("url"):
+                                if q_int and _lbl_height(s.get("qualityLabel","")) > q_int:
+                                    continue
+                                video_url = s["url"]; break
+                        if not video_url and prog_sorted:
+                            video_url = prog_sorted[0].get("url")
+                else:
+                    # Sifat berilmagan — eng yuqori adaptive'ni sinash
+                    video_candidates = [s for s in adap_streams
+                                        if "video" in s.get("type","") and s.get("url")]
+                    video_candidates.sort(key=lambda s: _lbl_height(s.get("qualityLabel","")), reverse=True)
+                    if video_candidates:
+                        video_url = video_candidates[0]["url"]
+                        audio_candidates = [s for s in adap_streams if "audio" in s.get("type","") and s.get("url")]
+                        audio_candidates.sort(key=lambda s: s.get("bitrate", 0), reverse=True)
+                        if audio_candidates:
+                            audio_url = audio_candidates[0]["url"]
                     if not video_url:
                         for s in reversed(prog_streams):
                             if s.get("url"):
                                 video_url = s["url"]; break
-                    # Hali topilmasa adaptive video + alohida audio
-                    if not video_url:
-                        for s in adap_streams:
-                            if str(quality) in s.get("qualityLabel","") and "video" in s.get("type",""):
-                                video_url = s["url"]; break
-                        if not video_url:
-                            for s in reversed(adap_streams):
-                                if "video" in s.get("type","") and s.get("url"):
-                                    video_url = s["url"]; break
-                        for s in adap_streams:
-                            if "audio" in s.get("type","") and s.get("url"):
-                                audio_url = s["url"]; break
-                else:
-                    # Eng yuqori progressive stream
-                    for s in reversed(prog_streams):
-                        if s.get("url"):
-                            video_url = s["url"]; break
 
                 if not video_url: continue
 

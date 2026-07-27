@@ -746,14 +746,17 @@ def _video_has_audio(path: Path) -> bool:
 def ensure_video_has_audio(path: Path) -> Path:
     """If the video has no audio track, remux it with a silent AAC stream.
 
-    Telegram auto-detects video-without-audio as an animation (GIF), which is
-    why some Instagram reels arrive as GIFs. Adding a silent audio track
-    forces Telegram to send them as proper videos.
+    Telegram auto-detects video-without-audio as an animation (GIF). Adding a
+    silent audio track forces Telegram to send them as proper videos. This is
+    intentional for silent meme clips; for Reels/TikTok this path means the
+    audio stream failed to download — check yt-dlp logs and cookies.txt.
     """
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         return path
     if _video_has_audio(path):
         return path
+    logger.warning(f"ensure_video_has_audio: no audio in {path.name} — adding silent track "
+                   f"(if this is a Reel/TikTok, audio download failed; check cookies.txt)")
     fixed = path.with_name(path.stem + "_wav" + path.suffix)
     try:
         r = subprocess.run(
@@ -1050,8 +1053,11 @@ def _download_video_sync(url: str, out_dir: Path,
                 fmt = "bestvideo+bestaudio/best"
                 fmt_sort = ["vcodec:h264", "fps", "res", "acodec:m4a"]
         else:
-            fmt = "bestvideo+bestaudio/best"
-            fmt_sort = None
+            # Instagram, TikTok, etc.: best separate streams merged, fallback to
+            # best combined that has audio. acodec!=none ensures we don't silently
+            # get a video-only stream that ensure_video_has_audio would patch.
+            fmt = "bestvideo+bestaudio/best[acodec!=none]/best"
+            fmt_sort = ["res", "fps", "tbr"]
 
         opts = {
             **YTDL_BASE,

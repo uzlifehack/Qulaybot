@@ -38,12 +38,6 @@ if not shutil.which("ffmpeg"):
         "will fail or silently downgrade quality."
     )
 
-# A realistic desktop UA reduces "bot" detection on several sites.
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-)
-
 # Dedicated pool: downloads are I/O bound, so allow a little headroom over
 # the download semaphore for the parallel get_info() probes.
 _EXECUTOR = ThreadPoolExecutor(
@@ -53,7 +47,6 @@ _EXECUTOR = ThreadPoolExecutor(
 
 YDL_BASE = {
     "quiet": True,
-    "no_warnings": True,
     "noprogress": True,
     "socket_timeout": 30,
     "retries": 5,
@@ -69,13 +62,13 @@ YDL_BASE = {
     "max_filesize": MAX_FILE_SIZE,
     "restrictfilenames": True,
     "overwrites": True,
-    "http_headers": {"User-Agent": USER_AGENT},
-    # Matches the combo confirmed working in production (qulay_bot.py).
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["ios", "android", "web"],
-        }
-    },
+    # player_client left at yt-dlp's default: ios/android cap at 360p without
+    # a PoToken. A JS runtime is required to solve YouTube signatures; without
+    # one, HD formats are silently dropped.
+    "js_runtimes": {"deno": {}, "node": {}, "bun": {}},
+    "remote_components": ["ejs:github"],
+    "logger": logger,
+    "no_warnings": False,
 }
 
 _VIDEO_FORMATS = "bestvideo+bestaudio/best"

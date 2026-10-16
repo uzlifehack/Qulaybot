@@ -59,7 +59,10 @@ MEDIA_STORAGE.mkdir(exist_ok=True)
 
 YTDL_BASE = {
     "quiet":                        True,
-    "no_warnings":                  True,
+    "no_warnings":                  False,
+    # Ogohlantirishlar ("Signature solving failed", "formats may be missing")
+    # jurnalga tushsin — avval ular yashirilgani uchun xira video sababi ko'rinmasdi.
+    "logger":                       logging.getLogger("yt_dlp"),
     "socket_timeout":               60,
     "retries":                      10,
     "fragment_retries":             10,
@@ -70,17 +73,10 @@ YTDL_BASE = {
     "nocheckcertificate":           True,
     "geo_bypass":                   True,
     "geo_bypass_country":           "US",
-    "http_headers": {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-        ),
-    },
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["web", "web_safari"],
-        }
-    },
+    # YouTube imzo/n-challenge'ni JS runtime orqali yechadi. Runtime yo'q bo'lsa
+    # yt-dlp HD formatlarni jimgina tashlab, faqat 360p qoldiradi ("xira" video).
+    "js_runtimes":                  {"deno": {}, "node": {}, "bun": {}},
+    "remote_components":            ["ejs:github"],
 }
 
 if Path(COOKIES_FILE).exists():
@@ -92,6 +88,19 @@ if _missing_bins:
         "Missing external tools on PATH: %s — install with: "
         "apt install -y ffmpeg  &&  pip install -U gallery-dl yt-dlp",
         ", ".join(_missing_bins),
+    )
+try:
+    with yt_dlp.YoutubeDL({"quiet": True, "js_runtimes": YTDL_BASE["js_runtimes"]}) as _y:
+        _js_ok = [n for n, r in _y._js_runtimes.items() if r and r.info and r.info.supported]
+except Exception:
+    _js_ok = []
+if _js_ok:
+    logging.info(f"yt-dlp JS runtime: {', '.join(_js_ok)}")
+else:
+    logging.error(
+        "No supported JavaScript runtime (deno>=2.3 / node>=22 / bun>=1.2.11) — "
+        "YouTube will only give 360p. Install: curl -fsSL https://deno.land/install.sh | sh "
+        "&& ln -sf ~/.deno/bin/deno /usr/local/bin/deno"
     )
 
 def _make_progress_hook(callback):
@@ -351,6 +360,12 @@ def db_init():
         c.execute("CREATE INDEX IF NOT EXISTS idx_dl_user ON downloads(user_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_users_active ON users(last_active)")
         c.execute("CREATE TABLE IF NOT EXISTS url_cache (url TEXT PRIMARY KEY, file_id TEXT NOT NULL, media_type TEXT NOT NULL, title TEXT DEFAULT '', created_at TEXT)")
+        # Format/audio fix'laridan oldin keshlangan videolar xira, ovozsiz yoki
+        # GIF bo'lishi mumkin — ular muddatsiz qayta yuborilmasligi uchun bir marta tozalanadi.
+        if c.execute("PRAGMA user_version").fetchone()[0] < 2:
+            n = c.execute("DELETE FROM url_cache WHERE media_type IN ('video','animation')").rowcount
+            c.execute("PRAGMA user_version = 2")
+            logging.info(f"url_cache: purged {n} pre-fix video entries")
         conn.commit()
 
 @_db_retry
@@ -1079,11 +1094,12 @@ def _download_video_sync(url: str, out_dir: Path,
         # yordam berishi mumkin — bot check, PoToken, SABR muammolari uchun.
         attempts = []
         if is_youtube:
-            # Cookie bilan web client HD sifat beradi.
-            # ios/android PoTokensiz faqat 360p max qaytaradi — ishlatmaymiz.
+            # None = yt-dlp'ning o'z standart client'lari (har relizda yangilanadi;
+            # cookie bilan: web_embedded, tv_downgraded, web). ios/android
+            # PoTokensiz 360p beradi — ishlatmaymiz. tv_embedded endi mavjud emas.
             attempts = [
-                ["web", "web_safari"],
-                ["tv_embedded", "web"],
+                None,
+                ["tv", "web_safari"],
                 ["mweb"],
             ]
         elif "facebook.com" in url or "fb.watch" in url:
@@ -1104,9 +1120,12 @@ def _download_video_sync(url: str, out_dir: Path,
                     if fname and not fname.endswith('.mp4') and quality != "audio":
                         fname = _re.sub(r'\.[^.]+$', '.mp4', fname)
                     if not os.path.exists(fname):
-                        files = list(out_dir.glob("*"))
+                        files = [f for f in out_dir.glob("*") if f.is_file()
+                                 and f.suffix.lower() not in (".part", ".ytdl", ".jpg", ".webp", ".png")]
                         fname = str(max(files, key=os.path.getctime)) if files else None
                     if not fname: raise Exception("no file")
+                    logger.info(f"yt-dlp [{','.join(clients) if clients else 'default'}] "
+                                f"format={info.get('format')} vcodec={info.get('vcodec')}")
                     site_map = {"youtube": "YouTube", "tiktok": "TikTok",
                                 "instagram": "Instagram", "twitter": "Twitter",
                                 "facebook": "Facebook", "vimeo": "Vimeo"}

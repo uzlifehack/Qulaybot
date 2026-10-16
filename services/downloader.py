@@ -17,7 +17,7 @@ Optimised for speed and resilience:
 import asyncio
 import os
 import shutil
-import tempfile
+import uuid
 import logging
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -124,7 +124,7 @@ def _get_info_sync(url: str) -> dict:
 
 
 async def _run(func, *args):
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_EXECUTOR, func, *args)
 
 
@@ -133,7 +133,7 @@ async def get_info(url: str) -> dict:
 
 
 async def download_video(url: str) -> Optional[str]:
-    tmp = tempfile.mktemp(suffix=".mp4", dir=TMP_DIR)
+    tmp = _tmp_path(".mp4")
     try:
         path = await _run(_download_video_sync, url, tmp)
         return path if path and os.path.exists(path) else None
@@ -143,7 +143,7 @@ async def download_video(url: str) -> Optional[str]:
 
 
 async def download_audio(url: str) -> Optional[str]:
-    tmp = tempfile.mktemp(dir=TMP_DIR)
+    tmp = _tmp_path()
     try:
         path = await _run(_download_audio_sync, url, tmp)
         return path if path and os.path.exists(path) else None
@@ -153,7 +153,7 @@ async def download_audio(url: str) -> Optional[str]:
 
 
 async def extract_audio_from_file(file_path: str) -> str:
-    out = tempfile.mktemp(suffix=".mp3", dir=TMP_DIR)
+    out = _tmp_path(".mp3")
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-i", file_path,
         "-vn", "-ar", "44100", "-ac", "2", "-ab", "192k",
@@ -163,6 +163,10 @@ async def extract_audio_from_file(file_path: str) -> str:
     )
     await proc.wait()
     return out
+
+
+def _tmp_path(suffix: str = "") -> str:
+    return os.path.join(TMP_DIR, f"dl_{uuid.uuid4().hex}{suffix}")
 
 
 def cleanup(*paths):

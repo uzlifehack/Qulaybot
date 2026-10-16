@@ -107,4 +107,4 @@ async def main():
     await idle(); await close_redis(); await close_session(); await app.stop()
 
 if __name__ == "__main__":
-    app.run(main())
+    app.loop.run_until_complete(main())

@@ -1,4 +1,4 @@
-import asyncio, os, tempfile, json, logging, traceback
+import asyncio, os, uuid, json, logging, traceback
 from pathlib import Path
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
@@ -25,7 +25,7 @@ def register(app):
         st = await msg.reply_text("🎤 Aniqlanmoqda...")
         fp = None
         try:
-            fp = await asyncio.wait_for(msg.download(file_name=tempfile.mktemp(dir="/tmp")), timeout=60)
+            fp = await asyncio.wait_for(msg.download(file_name=os.path.join("/tmp", f"shz_{uuid.uuid4().hex}")), timeout=60)
             if not fp or not os.path.exists(fp):
                 try: await st.edit_text(t(lang,"error"))
                 except: pass

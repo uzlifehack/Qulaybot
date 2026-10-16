@@ -57,7 +57,7 @@ def _download_sync(url: str, out_dir: str) -> list[str]:
 async def download_media(url: str) -> list[str]:
     """Download up to MAX_ITEMS media files (images + videos)."""
     out_dir = tempfile.mkdtemp(dir="/tmp")
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         files = await asyncio.wait_for(
             loop.run_in_executor(None, _download_sync, url, out_dir),

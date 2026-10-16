@@ -578,11 +578,8 @@ async def cache_to_channel(client, file_path: str, media_type: str, **kwargs) ->
         logger.error(f"cache_to_channel: {e}")
     return None, None
 
-async def bg_cache(client, file_path, media_type, url, loop=None, **kwargs):
-    """Background da kanalga yuborish va DB ga saqlash.
-
-    loop argument saqlanadi backward-compat uchun, lekin ishlatilmaydi —
-    running loop coroutine ichida olinadi."""
+async def bg_cache(client, file_path, media_type, url, **kwargs):
+    """Background da kanalga yuborish va DB ga saqlash."""
     try:
         await asyncio.sleep(1)
         kwargs.pop("thumb", None)
@@ -904,7 +901,7 @@ def _find_audio_file(out_dir: Path, quality: str) -> Optional[Path]:
 
 async def download_audio(query: str, quality: str, out_dir: Path,
                          expected_duration: int = 0, client=None, chat_id=None, status_msg=None) -> Optional[Path]:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     progress = {"pct": 0}
     def on_progress(pct):
         progress["pct"] = pct
@@ -1004,7 +1001,7 @@ async def search_deezer(query: str, limit: int = 10) -> List[dict]:
     cached = _deezer_cache.get(key)
     if cached and time.time() - cached[1] < DEEZER_CACHE_TTL:
         return cached[0]
-    loop    = asyncio.get_event_loop()
+    loop    = asyncio.get_running_loop()
     results = await loop.run_in_executor(None, _search_deezer_sync, query, limit)
     if results:
         _deezer_cache[key] = (results, time.time())
@@ -1012,18 +1009,9 @@ async def search_deezer(query: str, limit: int = 10) -> List[dict]:
 
 # ─── VIDEO DOWNLOAD ───────────────────────────────────────────────────────────
 
-INVIDIOUS_INSTANCES = [
-    "https://inv.nadeko.net",
-    "https://inv.us.projectsegfau.lt",
-    "https://invidious.privacyredirect.com",
-    "https://iv.ggtyler.dev",
-    "https://yt.artemislena.eu",
-    "https://invidious.fdn.fr",
-]
-
 async def download_video(url: str, out_dir: Path, quality: str = None,
                          client=None, chat_id=None, status_msg=None) -> Optional[Tuple[Path, str, str]]:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     progress = {"pct": 0}
     def on_progress(pct):
         progress["pct"] = pct
@@ -1051,7 +1039,6 @@ def _download_video_sync(url: str, out_dir: Path,
     import re as _re
     try:
         is_youtube = "youtube.com" in url or "youtu.be" in url
-        is_shorts  = "youtube.com/shorts/" in url
 
         # ── FORMAT STRING ────────────────────────────────────────────
         # [ext=mp4] majburiy shart oldin — ba'zi videolarda mp4 stream yo'q edi
@@ -1148,119 +1135,8 @@ def _download_video_sync(url: str, out_dir: Path,
                 if not is_youtube:
                     break
 
-        # yt-dlp muvaffaqiyatsiz — YouTube uchun Invidious fallback
-        if not is_youtube:
-            if last_err:
-                logger.error(f"non-youtube dl_fail: {last_err}")
-            return None
-
-        # ── 2. INVIDIOUS FALLBACK (faqat YouTube) ────────────────────
-        vid_id = extract_video_id(url)
-        if not vid_id:
-            return None
-
-        for instance in INVIDIOUS_INSTANCES:
-            try:
-                r = requests.get(f"{instance}/api/v1/videos/{vid_id}",
-                                  timeout=8, headers={"User-Agent": "Mozilla/5.0"})
-                if r.status_code != 200: continue
-                data    = r.json()
-                title   = data.get("title", "")
-                # Progressive streamlar (video+audio birlashgan)
-                prog_streams = data.get("formatStreams", [])
-                adap_streams = data.get("adaptiveFormats", [])
-
-                video_url = audio_url = None
-
-                q_int = int(quality) if (quality and quality.isdigit()) else None
-
-                def _lbl_height(lbl: str) -> int:
-                    m = re.search(r"(\d+)p", lbl or "")
-                    return int(m.group(1)) if m else 0
-
-                if quality and quality != "audio":
-                    # AVVAL adaptive video stream (HD 1080p+ shu yerda),
-                    # KEYIN progressive (max 720p) fallback sifatida.
-                    video_candidates = [
-                        s for s in adap_streams
-                        if "video" in s.get("type", "") and s.get("url")
-                    ]
-                    video_candidates.sort(key=lambda s: _lbl_height(s.get("qualityLabel", "")), reverse=True)
-                    if q_int:
-                        capped = [s for s in video_candidates if _lbl_height(s.get("qualityLabel","")) <= q_int]
-                        if capped:
-                            video_url = capped[0]["url"]
-                    if not video_url and video_candidates:
-                        video_url = video_candidates[0]["url"]
-                    # Adaptive video tanlangan bo'lsa — alohida audio ham kerak
-                    if video_url:
-                        audio_candidates = [s for s in adap_streams if "audio" in s.get("type","") and s.get("url")]
-                        audio_candidates.sort(key=lambda s: s.get("bitrate", 0), reverse=True)
-                        if audio_candidates:
-                            audio_url = audio_candidates[0]["url"]
-                    # Adaptive umuman yo'q bo'lsa — progressive'ga qaytamiz
-                    if not video_url:
-                        prog_sorted = sorted(prog_streams,
-                            key=lambda s: _lbl_height(s.get("qualityLabel","")), reverse=True)
-                        for s in prog_sorted:
-                            if s.get("url"):
-                                if q_int and _lbl_height(s.get("qualityLabel","")) > q_int:
-                                    continue
-                                video_url = s["url"]; break
-                        if not video_url and prog_sorted:
-                            video_url = prog_sorted[0].get("url")
-                else:
-                    # Sifat berilmagan — eng yuqori adaptive'ni sinash
-                    video_candidates = [s for s in adap_streams
-                                        if "video" in s.get("type","") and s.get("url")]
-                    video_candidates.sort(key=lambda s: _lbl_height(s.get("qualityLabel","")), reverse=True)
-                    if video_candidates:
-                        video_url = video_candidates[0]["url"]
-                        audio_candidates = [s for s in adap_streams if "audio" in s.get("type","") and s.get("url")]
-                        audio_candidates.sort(key=lambda s: s.get("bitrate", 0), reverse=True)
-                        if audio_candidates:
-                            audio_url = audio_candidates[0]["url"]
-                    if not video_url:
-                        for s in reversed(prog_streams):
-                            if s.get("url"):
-                                video_url = s["url"]; break
-
-                if not video_url: continue
-
-                def _dl_stream(stream_url, out_path):
-                    resp = requests.get(stream_url, stream=True, timeout=120,
-                                        headers={"User-Agent": "Mozilla/5.0"})
-                    if resp.status_code != 200:
-                        raise Exception(f"HTTP {resp.status_code}")
-                    with open(out_path, "wb") as f:
-                        for chunk in resp.iter_content(65536): f.write(chunk)
-
-                vid_path = out_dir / f"inv_v_{vid_id}.mp4"
-                _dl_stream(video_url, vid_path)
-
-                # Audio alohida bo'lsa — FFmpeg bilan birlashtirish
-                if audio_url:
-                    aud_path = out_dir / f"inv_a_{vid_id}.m4a"
-                    _dl_stream(audio_url, aud_path)
-                    merged = out_dir / f"inv_{vid_id}_merged.mp4"
-                    ret = subprocess.run(
-                        ["ffmpeg", "-i", str(vid_path), "-i", str(aud_path),
-                         "-c:v", "copy", "-c:a", "aac", "-strict", "experimental",
-                         str(merged), "-y"],
-                        capture_output=True, timeout=120
-                    )
-                    vid_path.unlink(missing_ok=True)
-                    aud_path.unlink(missing_ok=True)
-                    if merged.exists() and merged.stat().st_size > 0:
-                        return merged, "YouTube", title
-                else:
-                    if vid_path.exists() and vid_path.stat().st_size > 0:
-                        return vid_path, "YouTube", title
-
-            except Exception as inv_e:
-                logger.warning(f"Invidious {instance}: {inv_e}")
-                continue
-
+        if last_err:
+            logger.error(f"dl_fail ({'youtube' if is_youtube else 'other'}): {last_err}")
         return None
     except Exception as e:
         logger.error(f"download_video: {e}")
@@ -1270,7 +1146,7 @@ async def download_tiktok_video(url: str, out_dir: Path) -> Optional[Tuple[Path,
     result = await download_video(url, out_dir)
     if result: return result
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         resp = await loop.run_in_executor(
             None,
             lambda: requests.get(f"https://www.tikwm.com/api/?url={url}&hd=1",
@@ -1292,7 +1168,7 @@ async def download_tiktok_video(url: str, out_dir: Path) -> Optional[Tuple[Path,
 async def download_tiktok_slideshow(url: str, out_dir: Path) -> Optional[dict]:
     """TikTok slideshow: rasmlar + audio"""
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         resp = await loop.run_in_executor(
             None,
             lambda: requests.get(f"https://www.tikwm.com/api/?url={url}&hd=1",
@@ -1373,7 +1249,7 @@ async def download_gallery(url: str, out_dir: Path, client=None, chat_id=None,
         media_dir  = get_user_media_dir(actual_uid)
         cap = t(lang, "caption")
 
-        loop_gal = asyncio.get_event_loop()
+        loop_gal = asyncio.get_running_loop()
         for i in range(0, len(all_media), 10):
             batch        = all_media[i:i+10]
             reply_target = original_msg or client
@@ -1386,7 +1262,7 @@ async def download_gallery(url: str, out_dir: Path, client=None, chat_id=None,
                     media_cache[mid]      = ("video", perm, 0, actual_uid, None, "")
                     media_cache_time[mid] = time.time()
                     kb   = _share_kb(mid, lang)
-                    sent = await reply_target.reply_video(str(f), caption=cap, supports_streaming=True, reply_markup=kb, quote=True)
+                    sent = await reply_target.reply_video(str(f), caption=cap, supports_streaming=True, reply_markup=kb)
                     _update_file_id(mid, sent)
                 elif f.suffix.lower() == ".gif":
                     mid  = uuid.uuid4().hex[:8]
@@ -1395,7 +1271,7 @@ async def download_gallery(url: str, out_dir: Path, client=None, chat_id=None,
                     media_cache[mid]      = ("video", perm, 0, actual_uid, None, "")
                     media_cache_time[mid] = time.time()
                     kb   = _share_kb(mid, lang) if is_social else InlineKeyboardMarkup([[InlineKeyboardButton(t(lang,"share"), switch_inline_query=mid)]])
-                    sent = await reply_target.reply_animation(str(f), caption=cap, reply_markup=kb, quote=True)
+                    sent = await reply_target.reply_animation(str(f), caption=cap, reply_markup=kb)
                     _update_file_id(mid, sent)
                 else:
                     mid  = uuid.uuid4().hex[:8]
@@ -1404,7 +1280,7 @@ async def download_gallery(url: str, out_dir: Path, client=None, chat_id=None,
                     media_cache[mid]      = ("photo", perm, 0, actual_uid, None, "")
                     media_cache_time[mid] = time.time()
                     kb   = InlineKeyboardMarkup([[InlineKeyboardButton(t(lang,"share"), switch_inline_query=mid)]])
-                    sent = await reply_target.reply_photo(str(f), caption=cap, reply_markup=kb, quote=True)
+                    sent = await reply_target.reply_photo(str(f), caption=cap, reply_markup=kb)
                     _update_file_id(mid, sent)
             else:
                 media_group = []
@@ -1414,13 +1290,13 @@ async def download_gallery(url: str, out_dir: Path, client=None, chat_id=None,
                         media_group.append(InputMediaVideo(str(f), caption=c2))
                     else:
                         media_group.append(InputMediaPhoto(str(f), caption=c2))
-                sent_group = await reply_target.reply_media_group(media_group, quote=True)
+                sent_group = await reply_target.reply_media_group(media_group)
                 group_mid  = uuid.uuid4().hex[:8]
                 fid = sent_group[0].photo.file_id if sent_group and sent_group[0].photo else None
                 media_cache[group_mid]      = ("photo", Path(), 0, actual_uid, fid, "")
                 media_cache_time[group_mid] = time.time()
                 if fid: save_file_id(group_mid, fid, "photo")
-                await reply_target.reply_text("⬆️", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(lang,"share"), switch_inline_query=group_mid)]]), quote=True)
+                await reply_target.reply_text("⬆️", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(lang,"share"), switch_inline_query=group_mid)]]))
         return True
     except Exception as e:
         logger.error(f"gallery-dl: {e}")
@@ -1434,7 +1310,7 @@ async def download_gallery(url: str, out_dir: Path, client=None, chat_id=None,
 async def get_spotify_track_info(track_id: str) -> Optional[Dict]:
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                "Accept-Language": "en-US,en;q=0.9"}
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     for attempt in range(3):
         try:
             r = await loop.run_in_executor(
@@ -1463,29 +1339,13 @@ async def get_spotify_track_info(track_id: str) -> Optional[Dict]:
 # ─── SHAZAM (serverda to'g'ridan) ─────────────────────────────────────────────
 
 _shazam_instance = None
-_shazam_method_name = None
 
 def _get_shazam():
-    """Cached Shazam client + resolved method name across shazamio versions.
-
-    shazamio renamed `recognize_song()` → `recognize()` around 0.5.0. Trying
-    both attributes lets us work on either release without a hard pin.
-    """
-    global _shazam_instance, _shazam_method_name
+    global _shazam_instance
     if _shazam_instance is None:
         from shazamio import Shazam
         _shazam_instance = Shazam()
-        for name in ("recognize", "recognize_song"):
-            if hasattr(_shazam_instance, name):
-                _shazam_method_name = name
-                break
-        if _shazam_method_name is None:
-            raise AttributeError(
-                "shazamio: neither .recognize nor .recognize_song exists; "
-                "unsupported shazamio version"
-            )
-        logger.info(f"shazamio ready — using method: {_shazam_method_name}")
-    return _shazam_instance, _shazam_method_name
+    return _shazam_instance
 
 async def shazam_audio(audio_path: Path) -> Optional[Dict]:
     try:
@@ -1496,9 +1356,7 @@ async def shazam_audio(audio_path: Path) -> Optional[Dict]:
         if size < 1024:
             logger.warning(f"shazam: audio too small ({size} bytes) — likely empty")
             return None
-        shazam, method_name = _get_shazam()
-        method = getattr(shazam, method_name)
-        out    = await asyncio.wait_for(method(str(audio_path)), timeout=25)
+        out    = await asyncio.wait_for(_get_shazam().recognize(str(audio_path)), timeout=25)
         if not out:
             logger.warning("shazam: empty response")
             return None
@@ -1555,7 +1413,7 @@ async def youtube_quality_kb(vid: str, url: str, lang: str = "uz") -> InlineKeyb
 
 async def check_force_sub(c: Client, user_id: int) -> bool:
     if user_id in ADMIN_IDS: return True
-    loop     = asyncio.get_event_loop()
+    loop     = asyncio.get_running_loop()
     channels = await loop.run_in_executor(None, db_get_force_channels)
     if not channels: return True
     from pyrogram.enums import ChatMemberStatus
@@ -1576,7 +1434,7 @@ async def check_force_sub(c: Client, user_id: int) -> bool:
     return True
 
 async def send_force_sub(c: Client, m: Message, lang: str):
-    loop     = asyncio.get_event_loop()
+    loop     = asyncio.get_running_loop()
     channels = await loop.run_in_executor(None, db_get_force_channels)
     if not channels: return
     from pyrogram.enums import ChatMemberStatus
@@ -1591,7 +1449,7 @@ async def send_force_sub(c: Client, m: Message, lang: str):
         except Exception: pass
         buttons.append([InlineKeyboardButton(ch_clean, url=link)])
     buttons.append([InlineKeyboardButton(t(lang, "check_btn"), callback_data="forcesub_check")])
-    await m.reply_text(t(lang, "force_sub"), reply_markup=InlineKeyboardMarkup(buttons), quote=True)
+    await m.reply_text(t(lang, "force_sub"), reply_markup=InlineKeyboardMarkup(buttons))
 
 # ─── APP ──────────────────────────────────────────────────────────────────────
 
@@ -1672,14 +1530,14 @@ async def _do_shazam(c: Client, uid: int, media_id: str,
                      reply_to, cb_message=None, lang="uz") -> None:
     media_info = media_cache.get(media_id)
     if not media_info:
-        await reply_to.reply_text(t(lang,"media_not_found"), quote=True); return
+        await reply_to.reply_text(t(lang,"media_not_found")); return
     media_type = media_info[0]
     media_path = media_info[1]
     if not media_path or not media_path.exists():
-        await reply_to.reply_text(t(lang,"file_not_found"), quote=True); return
+        await reply_to.reply_text(t(lang,"file_not_found")); return
     sem = await get_semaphore(uid)
     if sem.locked():
-        await reply_to.reply_text(t(lang,"wait"), quote=True); return
+        await reply_to.reply_text(t(lang,"wait")); return
     await sem.acquire()
     tmp = TEMP_BASE / f"shazam_{uid}_{uuid.uuid4().hex[:6]}"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -1690,7 +1548,7 @@ async def _do_shazam(c: Client, uid: int, media_id: str,
             sample     = tmp / "sample.mp3"
             audio_path = extract_audio_from_video(media_path, sample)
             if not audio_path:
-                await reply_to.reply_text(t(lang,"audio_extract_fail"), quote=True)
+                await reply_to.reply_text(t(lang,"audio_extract_fail"))
                 return
         else:
             audio_path = media_path
@@ -1707,9 +1565,9 @@ async def _do_shazam(c: Client, uid: int, media_id: str,
             track_cache_time[tid] = time.time()
             text = f"{artist} - {title}"
             if track.get("album"): text += f"\n{track['album']}"
-            await reply_to.reply_text(text, reply_markup=audio_format_kb(tid), quote=True)
+            await reply_to.reply_text(text, reply_markup=audio_format_kb(tid))
         else:
-            await reply_to.reply_text(t(lang,"shazam_fail"), quote=True)
+            await reply_to.reply_text(t(lang,"shazam_fail"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
         sem.release()
@@ -1722,24 +1580,24 @@ async def start_cmd(c: Client, m: Message):
     uid     = m.from_user.id
     tg_lang = (m.from_user.language_code or "uz").lower()[:2]
     lang    = TG_LANG_MAP.get(tg_lang, "uz")
-    loop    = asyncio.get_event_loop()
+    loop    = asyncio.get_running_loop()
     await loop.run_in_executor(None, lambda: db_user(
         uid, m.from_user.username, m.from_user.first_name, lang
     ))
-    await m.reply_text(t(lang,"start"), reply_markup=lang_kb(), quote=True)
+    await m.reply_text(t(lang,"start"), reply_markup=lang_kb())
 
 @app.on_message(filters.command("lang"))
 @catch_errors
 async def lang_cmd(_, m: Message):
-    lang = await asyncio.get_event_loop().run_in_executor(None, db_get_lang, m.from_user.id)
-    await m.reply_text(t(lang,"select_lang"), reply_markup=lang_kb(), quote=True)
+    lang = await asyncio.get_running_loop().run_in_executor(None, db_get_lang, m.from_user.id)
+    await m.reply_text(t(lang,"select_lang"), reply_markup=lang_kb())
 
 @app.on_callback_query(filters.regex(r"^lang:(uz|ru|en|tr)$"))
 @catch_errors
 async def lang_cb(_, cb: CallbackQuery):
     lang = cb.matches[0].group(1)
     uid  = cb.from_user.id
-    await asyncio.get_event_loop().run_in_executor(None, lambda: db_set_lang(uid, lang))
+    await asyncio.get_running_loop().run_in_executor(None, lambda: db_set_lang(uid, lang))
     await cb.answer(t(lang,"lang_set"))
     try: await cb.message.edit_text(t(lang,"lang_set"))
     except Exception: pass
@@ -1747,8 +1605,8 @@ async def lang_cb(_, cb: CallbackQuery):
 @app.on_message(filters.command("imkoniyatlar"))
 @catch_errors
 async def imkoniyatlar_cmd(_, m: Message):
-    lang = await asyncio.get_event_loop().run_in_executor(None, db_get_lang, m.from_user.id)
-    await m.reply_text(t(lang,"capabilities"), parse_mode=enums.ParseMode.HTML, quote=True)
+    lang = await asyncio.get_running_loop().run_in_executor(None, db_get_lang, m.from_user.id)
+    await m.reply_text(t(lang,"capabilities"), parse_mode=enums.ParseMode.HTML)
 
 # ─── TEXT HANDLER ─────────────────────────────────────────────────────────────
 
@@ -1763,13 +1621,13 @@ async def text_handler(c: Client, m: Message):
     if not m.from_user:
         return
     uid  = m.from_user.id
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     is_banned, rate_ok, lang = await loop.run_in_executor(
         None, lambda: db_check_user_status(uid, m.from_user.username, m.from_user.first_name))
     if is_banned:
-        await m.reply_text(t(lang,"banned"), quote=True); return
+        await m.reply_text(t(lang,"banned")); return
     if not rate_ok:
-        await m.reply_text(t(lang,"rate"), quote=True); return
+        await m.reply_text(t(lang,"rate")); return
     if not await check_force_sub(c, uid):
         await send_force_sub(c, m, lang); return
     text = m.text.strip()
@@ -1786,11 +1644,11 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
     try:
         await asyncio.wait_for(sem.acquire(), timeout=5)
     except asyncio.TimeoutError:
-        await m.reply_text(t(lang,"wait"), quote=True); return
+        await m.reply_text(t(lang,"wait")); return
     tmp = TEMP_BASE / f"tmp_{uid}_{uuid.uuid4().hex[:6]}"
     tmp.mkdir(parents=True, exist_ok=True)
     chat_id = m.chat.id
-    loop    = asyncio.get_event_loop()
+    loop    = asyncio.get_running_loop()
     cap     = t(lang,"caption")
     stop_action = asyncio.Event()
     action_task = None
@@ -1805,11 +1663,11 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
             media_cache_time[mid] = time.time()
             try:
                 if ftype == "audio":
-                    await m.reply_audio(fid, caption=cap, reply_markup=_share_kb_audio(mid, lang), quote=True)
+                    await m.reply_audio(fid, caption=cap, reply_markup=_share_kb_audio(mid, lang))
                 else:
-                    await reply_cached(m, fid, ftype, caption=cap, reply_markup=_share_kb(mid, lang), quote=True)
+                    await reply_cached(m, fid, ftype, caption=cap, reply_markup=_share_kb(mid, lang))
             except Exception:
-                await m.reply_document(fid, caption=cap, quote=True)
+                await m.reply_document(fid, caption=cap)
             return
         # In-memory cache
         _cached_id, _cached_type = _get_url_cache(url)
@@ -1821,10 +1679,10 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
             if _ci and _ci[4]:
                 if _cached_type == "audio":
                     await m.reply_audio(_ci[4], caption=cap,
-                        reply_markup=_share_kb_audio(_cached_id, lang), quote=True)
+                        reply_markup=_share_kb_audio(_cached_id, lang))
                 else:
                     await m.reply_video(_ci[4], caption=cap,
-                        reply_markup=_share_kb(_cached_id, lang), quote=True)
+                        reply_markup=_share_kb(_cached_id, lang))
                 return
 
         # IMDB
@@ -1847,12 +1705,12 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
                         media_cache[mid]      = ("photo", perm, 0, uid, None, "")
                         media_cache_time[mid] = time.time()
                         kb   = InlineKeyboardMarkup([[InlineKeyboardButton(t(lang,"share"), switch_inline_query=mid)]])
-                        sent = await m.reply_photo(str(img_path), caption=cap, reply_markup=kb, quote=True)
+                        sent = await m.reply_photo(str(img_path), caption=cap, reply_markup=kb)
                         _update_file_id(mid, sent)
                         return
             except Exception as e:
                 logger.error(f"imdb: {e}")
-            await m.reply_text(t(lang,"link_fail"), quote=True); return
+            await m.reply_text(t(lang,"link_fail")); return
 
         # Direct video
         if re.search(r"\.(mp4|mkv|avi|mov|webm)(\?|$)", url, re.I):
@@ -1870,10 +1728,10 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
                     if direct.stat().st_size > 0:
                         media_id, final = _save_media(uid, direct, "video")
                         msg = await m.reply_video(str(final), caption=cap,
-                            supports_streaming=True, reply_markup=_share_kb(media_id, lang), quote=True)
+                            supports_streaming=True, reply_markup=_share_kb(media_id, lang))
                         _update_file_id(media_id, msg)
                         _set_url_cache(url, media_id, "video")
-                        safe_task(bg_cache(c, str(final), "video", url, loop, caption=cap, supports_streaming=True))
+                        safe_task(bg_cache(c, str(final), "video", url, caption=cap, supports_streaming=True))
                         return
             except Exception as e:
                 logger.error(f"direct mp4: {e}")
@@ -1886,12 +1744,12 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
                 vpath, *_ = result
                 media_id, final = _save_media(uid, vpath, "video")
                 msg = await m.reply_video(str(final), caption=cap,
-                    supports_streaming=True, reply_markup=_share_kb(media_id, lang), quote=True)
+                    supports_streaming=True, reply_markup=_share_kb(media_id, lang))
                 _update_file_id(media_id, msg)
                 _set_url_cache(url, media_id, "video")
-                safe_task(bg_cache(c, str(final), "video", url, loop, caption=cap, supports_streaming=True))
+                safe_task(bg_cache(c, str(final), "video", url, caption=cap, supports_streaming=True))
             else:
-                await m.reply_text(t(lang,"dl_fail"), quote=True)
+                await m.reply_text(t(lang,"dl_fail"))
             return
 
         # Spotify
@@ -1919,17 +1777,17 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
                         str(final), title=track_info["title"],
                         performer=track_info["artist"], thumb=thumb,
                         duration=dur, caption=cap,
-                        reply_markup=_share_kb_audio(media_id, lang), quote=True
+                        reply_markup=_share_kb_audio(media_id, lang)
                     )
                     _update_file_id(media_id, msg)
                     _set_url_cache(url, media_id, "audio")
-                    safe_task(bg_cache(c, str(final), "audio", url, loop,
+                    safe_task(bg_cache(c, str(final), "audio", url,
                         title=track_info["title"], performer=track_info["artist"],
                         thumb=thumb, duration=dur, caption=cap))
                 else:
-                    await m.reply_text(t(lang,"dl_fail"), quote=True)
+                    await m.reply_text(t(lang,"dl_fail"))
             else:
-                await m.reply_text(t(lang,"not_found"), quote=True)
+                await m.reply_text(t(lang,"not_found"))
             return
 
         # TikTok
@@ -1951,10 +1809,10 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
                 if has_video:
                     media_id, final = _save_media(uid, vpath, "video")
                     msg = await m.reply_video(str(final), caption=cap,
-                        supports_streaming=True, reply_markup=_share_kb(media_id, lang), quote=True)
+                        supports_streaming=True, reply_markup=_share_kb(media_id, lang))
                     _update_file_id(media_id, msg)
                     _set_url_cache(url, media_id, "video")
-                    safe_task(bg_cache(c, str(final), "video", url, loop, caption=cap, supports_streaming=True))
+                    safe_task(bg_cache(c, str(final), "video", url, caption=cap, supports_streaming=True))
                 else:
                     # Slideshow bo'lishi mumkin - rasmlarni tekshiramiz
                     slideshow = await download_tiktok_slideshow(url, tmp)
@@ -1964,14 +1822,14 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
                         for i in range(0, len(imgs), 10):
                             batch = imgs[i:i+10]
                             if len(batch) == 1:
-                                await m.reply_photo(str(batch[0]), caption=cap, quote=True)
+                                await m.reply_photo(str(batch[0]), caption=cap)
                             else:
                                 media_group = [InputMediaPhoto(str(f), caption=cap if j==0 else "") for j, f in enumerate(batch)]
-                                await m.reply_media_group(media_group, quote=True)
+                                await m.reply_media_group(media_group)
                         if slideshow.get("audio") and slideshow["audio"].exists():
                             media_id, final = _save_media(uid, slideshow["audio"], "audio")
                             msg = await m.reply_audio(str(final), caption=cap,
-                                reply_markup=_share_kb_audio(media_id, lang), quote=True)
+                                reply_markup=_share_kb_audio(media_id, lang))
                             _update_file_id(media_id, msg)
                     else:
                         mp3 = tmp / "audio.mp3"
@@ -1980,10 +1838,10 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
                         if mp3.exists() and mp3.stat().st_size > 0:
                             media_id, final = _save_media(uid, mp3, "audio")
                             msg = await m.reply_audio(str(final), caption=cap,
-                                reply_markup=_share_kb_audio(media_id, lang), quote=True)
+                                reply_markup=_share_kb_audio(media_id, lang))
                             _update_file_id(media_id, msg)
                         else:
-                            await m.reply_text(t(lang,"dl_fail"), quote=True)
+                            await m.reply_text(t(lang,"dl_fail"))
             else:
                 # Video yo'q, slideshow tekshirish
                 slideshow = await download_tiktok_slideshow(url, tmp)
@@ -1993,17 +1851,17 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
                     for i in range(0, len(imgs), 10):
                         batch = imgs[i:i+10]
                         if len(batch) == 1:
-                            await m.reply_photo(str(batch[0]), caption=cap, quote=True)
+                            await m.reply_photo(str(batch[0]), caption=cap)
                         else:
                             media_group = [InputMediaPhoto(str(f), caption=cap if j==0 else "") for j, f in enumerate(batch)]
-                            await m.reply_media_group(media_group, quote=True)
+                            await m.reply_media_group(media_group)
                     if slideshow.get("audio") and slideshow["audio"].exists():
                         media_id, final = _save_media(uid, slideshow["audio"], "audio")
                         msg = await m.reply_audio(str(final), caption=cap,
-                            reply_markup=_share_kb_audio(media_id, lang), quote=True)
+                            reply_markup=_share_kb_audio(media_id, lang))
                         _update_file_id(media_id, msg)
                 else:
-                    await m.reply_text(t(lang,"dl_fail"), quote=True)
+                    await m.reply_text(t(lang,"dl_fail"))
             return
 
         # Facebook — alohida branch, chunki gallery-dl uni yaxshi ishlab bermaydi
@@ -2020,13 +1878,13 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
                 w, h, dur, thumb = _get_video_meta(final)
                 msg = await m.reply_video(str(final), caption=cap,
                     supports_streaming=True, width=w, height=h, duration=dur,
-                    thumb=thumb, reply_markup=_share_kb(media_id, lang), quote=True)
+                    thumb=thumb, reply_markup=_share_kb(media_id, lang))
                 _update_file_id(media_id, msg)
                 _set_url_cache(url, media_id, "video")
-                safe_task(bg_cache(c, str(final), "video", url, loop, caption=cap, supports_streaming=True))
+                safe_task(bg_cache(c, str(final), "video", url, caption=cap, supports_streaming=True))
                 await loop.run_in_executor(None, lambda: db_add_download(uid, url, "Facebook", "ok"))
             else:
-                await m.reply_text(t(lang,"dl_fail"), quote=True)
+                await m.reply_text(t(lang,"dl_fail"))
             return
 
         # Instagram
@@ -2037,22 +1895,22 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
                 vpath, *_ = result
                 media_id, final = _save_media(uid, vpath, "video")
                 msg = await m.reply_video(str(final), caption=cap,
-                    supports_streaming=True, reply_markup=_share_kb(media_id, lang), quote=True)
+                    supports_streaming=True, reply_markup=_share_kb(media_id, lang))
                 _update_file_id(media_id, msg)
                 _set_url_cache(url, media_id, "video")
-                safe_task(bg_cache(c, str(final), "video", url, loop, caption=cap, supports_streaming=True))
+                safe_task(bg_cache(c, str(final), "video", url, caption=cap, supports_streaming=True))
             else:
                 # Rasm post - gallery-dl bilan
                 await c.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
                 if not await download_gallery(url, tmp, c, chat_id, original_msg=m, lang=lang):
-                    await m.reply_text(t(lang,"dl_fail"), quote=True)
+                    await m.reply_text(t(lang,"dl_fail"))
             return
 
         # YouTube Shorts - quality menu yoq, avtomatik eng yuqori sifat
         shorts_id = extract_shorts_id(url)
         if shorts_id:
             action_task = asyncio.create_task(keep_action(c, chat_id, ChatAction.UPLOAD_VIDEO, stop_action))
-            status_msg = await m.reply_text("⏳ Yuklanmoqda...", quote=True)
+            status_msg = await m.reply_text("⏳ Yuklanmoqda...")
             result = await download_video(url, tmp, client=c, chat_id=chat_id, status_msg=status_msg)
             try: await status_msg.delete()
             except Exception: pass
@@ -2069,13 +1927,13 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
                         th_file.write_bytes(tr.content)
                         thumb = str(th_file)
                 except Exception: pass
-                msg = await m.reply_video(str(final), caption=cap, supports_streaming=True, width=w, height=h, duration=dur, thumb=thumb, reply_markup=_share_kb(media_id, lang), quote=True)
+                msg = await m.reply_video(str(final), caption=cap, supports_streaming=True, width=w, height=h, duration=dur, thumb=thumb, reply_markup=_share_kb(media_id, lang))
                 _update_file_id(media_id, msg)
                 _set_url_cache(url, media_id, "video")
-                safe_task(bg_cache(c, str(final), "video", url, loop, caption=cap, supports_streaming=True))
+                safe_task(bg_cache(c, str(final), "video", url, caption=cap, supports_streaming=True))
                 await loop.run_in_executor(None, lambda: db_add_download(uid, url, "YouTube Shorts", "ok"))
             else:
-                await m.reply_text(t(lang,"dl_fail"), quote=True)
+                await m.reply_text(t(lang,"dl_fail"))
             return
 
         # YouTube oddiy video - quality menu
@@ -2084,7 +1942,7 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
             _youtube_url_cache[vid] = url
             await c.send_chat_action(chat_id, ChatAction.TYPING)
             kb = await youtube_quality_kb(vid, url, lang)
-            await m.reply_text(t(lang,"quality"), reply_markup=kb, quote=True)
+            await m.reply_text(t(lang,"quality"), reply_markup=kb)
             return
 
         # gallery-dl
@@ -2101,16 +1959,16 @@ async def handle_url(c: Client, m: Message, url: str, lang: str = "uz"):
             w, h, dur, thumb = _get_video_meta(final)
             msg = await m.reply_video(str(final), caption=cap,
                 supports_streaming=True, width=w, height=h, duration=dur,
-                thumb=thumb, reply_markup=_share_kb(media_id, lang), quote=True)
+                thumb=thumb, reply_markup=_share_kb(media_id, lang))
             _update_file_id(media_id, msg)
             _set_url_cache(url, media_id, "video")
-            safe_task(bg_cache(c, str(final), "video", url, loop,
+            safe_task(bg_cache(c, str(final), "video", url,
                 caption=cap, supports_streaming=True, width=w, height=h, duration=dur, thumb=thumb))
             await loop.run_in_executor(None, lambda: db_add_download(
                 uid, url, url.split("/")[2] if "/" in url else "other", "ok"
             ))
         else:
-            await m.reply_text(t(lang,"link_fail"), quote=True)
+            await m.reply_text(t(lang,"link_fail"))
     finally:
         stop_action.set()
         if action_task and not action_task.done():
@@ -2128,20 +1986,20 @@ async def handle_search(c: Client, m: Message, query: str, lang: str = "uz"):
     uid = m.from_user.id
     sem = await get_semaphore(uid)
     if sem.locked():
-        await m.reply_text(t(lang,"wait"), quote=True); return
+        await m.reply_text(t(lang,"wait")); return
     await sem.acquire()
     try:
         await c.send_chat_action(m.chat.id, ChatAction.TYPING)
         tracks = await search_deezer(query, 10)
         if not tracks:
-            await m.reply_text(t(lang,"not_found"), quote=True); return
+            await m.reply_text(t(lang,"not_found")); return
         lines = []
         for i, tr in enumerate(tracks[:10], 1):
             dur = format_duration(tr["duration"])
             lines.append(f"{i}. <b>{tr['artist']}</b> — {tr['title']}  <code>{dur}</code>")
         text = t(lang, "search_title", query=query, lines="\n".join(lines))
         await m.reply_text(text, reply_markup=track_kb(tracks),
-                           parse_mode=enums.ParseMode.HTML, quote=True)
+                           parse_mode=enums.ParseMode.HTML)
     finally:
         sem.release()
 
@@ -2156,7 +2014,7 @@ async def youtube_quality_cb(c: Client, cb: CallbackQuery):
     # (Eski _youtube_url_cache orqali ba'zi tugmalar "Eski so'rov" chiqarardi.)
     url     = _youtube_url_cache.get(vid) or f"https://www.youtube.com/watch?v={vid}"
     uid  = cb.from_user.id
-    lang = await asyncio.get_event_loop().run_in_executor(None, db_get_lang, uid)
+    lang = await asyncio.get_running_loop().run_in_executor(None, db_get_lang, uid)
     sem  = await get_semaphore(uid)
     if sem.locked():
         await cb.answer(t(lang,"wait"), show_alert=True); return
@@ -2173,7 +2031,7 @@ async def youtube_quality_cb(c: Client, cb: CallbackQuery):
         # Tanlangan sifatni asosiy menyuda ko'rsatib qo'yamiz — takroriy bosishlarga imkon bermaydi
         try: await cb.message.edit_text(f"{label} — ⏳ yuklanmoqda...")
         except Exception: pass
-        status_msg = await cb.message.reply_text(f"⏳ {label}", quote=True)
+        status_msg = await cb.message.reply_text(f"⏳ {label}")
         result = await download_video(url, tmp, quality if quality != "audio" else "audio",
                                       client=c, chat_id=chat_id, status_msg=status_msg)
         try: await status_msg.delete()
@@ -2186,7 +2044,7 @@ async def youtube_quality_cb(c: Client, cb: CallbackQuery):
             media_id, final = _save_media(uid, vpath, mtype)
             if quality == "audio":
                 msg = await cb.message.reply_audio(str(final), caption=cap,
-                    reply_markup=_share_kb_audio(media_id, lang), quote=True)
+                    reply_markup=_share_kb_audio(media_id, lang))
                 _update_file_id(media_id, msg)
             else:
                 w, h, dur, th_local = _get_video_meta(final)
@@ -2194,7 +2052,7 @@ async def youtube_quality_cb(c: Client, cb: CallbackQuery):
                 try:
                     vid_id = extract_video_id(url)
                     if vid_id:
-                        tr = await asyncio.get_event_loop().run_in_executor(
+                        tr = await asyncio.get_running_loop().run_in_executor(
                             None, lambda: requests.get(
                                 f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg", timeout=5))
                         if tr.status_code == 200:
@@ -2206,13 +2064,13 @@ async def youtube_quality_cb(c: Client, cb: CallbackQuery):
                 msg = await cb.message.reply_video(str(final), caption=cap,
                     supports_streaming=True, width=w, height=h, duration=dur,
                     thumb=str(thumb) if thumb else None,
-                    reply_markup=_share_kb(media_id, lang), quote=True)
+                    reply_markup=_share_kb(media_id, lang))
                 _update_file_id(media_id, msg)
                 _set_url_cache(url, media_id, "video")
-                safe_task(bg_cache(c, str(final), "video", url, asyncio.get_event_loop(),
+                safe_task(bg_cache(c, str(final), "video", url,
                     caption=cap, supports_streaming=True))
         else:
-            await cb.message.reply_text(t(lang,"dl_fail"), quote=True)
+            await cb.message.reply_text(t(lang,"dl_fail"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
         sem.release()
@@ -2231,8 +2089,7 @@ async def track_select_cb(_, cb: CallbackQuery):
         f"<b>{track['artist']}</b> — {track['title']}\n"
         f"{track.get('album','')}  <code>{format_duration(track['duration'])}</code>",
         reply_markup=audio_format_kb(new_tid),
-        parse_mode=enums.ParseMode.HTML,
-        quote=True
+        parse_mode=enums.ParseMode.HTML
     )
 
 @app.on_callback_query(filters.regex(r"^(mp3|flac):([a-f0-9]{6})$"))
@@ -2244,7 +2101,7 @@ async def download_audio_cb(c: Client, cb: CallbackQuery):
     if not track:
         await cb.answer("❌ Eski", show_alert=True); return
     uid  = cb.from_user.id
-    lang = await asyncio.get_event_loop().run_in_executor(None, db_get_lang, uid)
+    lang = await asyncio.get_running_loop().run_in_executor(None, db_get_lang, uid)
     sem  = await get_semaphore(uid)
     if sem.locked():
         await cb.answer(t(lang,"wait"), show_alert=True); return
@@ -2257,16 +2114,16 @@ async def download_audio_cb(c: Client, cb: CallbackQuery):
     track_key = "track:" + track["artist"].lower() + ":" + track["title"].lower() + ":" + quality
     try:
         # Keshdan tekshirish
-        loop2 = asyncio.get_event_loop()
+        loop2 = asyncio.get_running_loop()
         cached = await loop2.run_in_executor(None, load_file_id, track_key)
         if cached and cached.get("file_id"):
             await cb.message.reply_audio(
                 cached["file_id"], caption=cap,
-                reply_markup=_share_kb_audio(uuid.uuid4().hex[:8], lang), quote=True
+                reply_markup=_share_kb_audio(uuid.uuid4().hex[:8], lang)
             )
             return
         await c.send_chat_action(chat_id, ChatAction.UPLOAD_AUDIO)
-        status_msg = await cb.message.reply_text("⏳", quote=True)
+        status_msg = await cb.message.reply_text("⏳")
         exp_dur = int(track.get("duration") or 0)
         audio = await download_audio(
             f"{track['artist']} {track['title']}", quality, tmp,
@@ -2279,7 +2136,7 @@ async def download_audio_cb(c: Client, cb: CallbackQuery):
             thumb = None
             if track.get("cover"):
                 try:
-                    r = await asyncio.get_event_loop().run_in_executor(
+                    r = await asyncio.get_running_loop().run_in_executor(
                         None, lambda: requests.get(track["cover"], timeout=10))
                     if r.status_code == 200:
                         tp = tmp / "cover.jpg"
@@ -2290,16 +2147,16 @@ async def download_audio_cb(c: Client, cb: CallbackQuery):
             msg = await cb.message.reply_audio(
                 str(final), title=track["title"], performer=track["artist"],
                 thumb=thumb, duration=_dur, caption=cap,
-                reply_markup=_share_kb_audio(media_id, lang), quote=True
+                reply_markup=_share_kb_audio(media_id, lang)
             )
             _update_file_id(media_id, msg)
             if msg.audio:
                 save_file_id(track_key, msg.audio.file_id, "audio")
-                safe_task(bg_cache(c, str(final), "audio", track_key, asyncio.get_event_loop(),
+                safe_task(bg_cache(c, str(final), "audio", track_key,
                     title=track["title"], performer=track["artist"],
                     duration=_dur, caption=cap))
         else:
-            await cb.message.reply_text(t(lang,"dl_fail"), quote=True)
+            await cb.message.reply_text(t(lang,"dl_fail"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
         sem.release()
@@ -2309,7 +2166,7 @@ async def download_audio_cb(c: Client, cb: CallbackQuery):
 async def shazam_button_cb(c: Client, cb: CallbackQuery):
     await cb.answer()
     uid  = cb.from_user.id
-    lang = await asyncio.get_event_loop().run_in_executor(None, db_get_lang, uid)
+    lang = await asyncio.get_running_loop().run_in_executor(None, db_get_lang, uid)
     await _do_shazam(c, uid, cb.matches[0].group(1),
                      reply_to=cb.message, cb_message=cb.message, lang=lang)
 
@@ -2319,13 +2176,13 @@ async def media_handler(c: Client, m: Message):
     if not m.from_user:
         return
     uid  = m.from_user.id
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     lang = await loop.run_in_executor(None, db_get_lang, uid)
     if not await check_force_sub(c, uid):
         await send_force_sub(c, m, lang); return
     sem  = await get_semaphore(uid)
     if sem.locked():
-        await m.reply_text(t(lang,"wait"), quote=True); return
+        await m.reply_text(t(lang,"wait")); return
     await sem.acquire()
     media_dir = get_user_media_dir(uid)
     try:
@@ -2345,7 +2202,7 @@ async def media_handler(c: Client, m: Message):
         media_cache_time[media_id] = time.time()
         user_last_media[uid]       = media_id
         kb = _share_kb(media_id, lang) if media_type == "video" else _share_kb_audio(media_id, lang)
-        await m.reply_text("🔍 Shazam / 🎵 Audio", reply_markup=kb, quote=True)
+        await m.reply_text("🔍 Shazam / 🎵 Audio", reply_markup=kb)
     finally:
         sem.release()
 
@@ -2354,7 +2211,7 @@ async def media_handler(c: Client, m: Message):
 async def extract_audio_cb(c: Client, cb: CallbackQuery):
     media_id = cb.matches[0].group(1)
     uid      = cb.from_user.id
-    loop     = asyncio.get_event_loop()
+    loop     = asyncio.get_running_loop()
     lang     = await loop.run_in_executor(None, db_get_lang, uid)
     info     = media_cache.get(media_id)
     if not info:
@@ -2367,7 +2224,7 @@ async def extract_audio_cb(c: Client, cb: CallbackQuery):
     await cb.answer()
     sem = await get_semaphore(uid)
     if sem.locked():
-        await cb.message.reply_text(t(lang,"wait"), quote=True); return
+        await cb.message.reply_text(t(lang,"wait")); return
     await sem.acquire()
     tmp = TEMP_BASE / f"extract_{uid}_{uuid.uuid4().hex[:6]}"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -2399,11 +2256,11 @@ async def extract_audio_cb(c: Client, cb: CallbackQuery):
             except Exception: pass
             msg2 = await cb.message.reply_audio(
                 str(result), title=vid_title, thumb=thumb, caption=cap,
-                reply_markup=_share_kb_audio(new_mid, lang), quote=True
+                reply_markup=_share_kb_audio(new_mid, lang)
             )
             _update_file_id(new_mid, msg2)
         else:
-            await cb.message.reply_text(t(lang,"audio_extract_fail"), quote=True)
+            await cb.message.reply_text(t(lang,"audio_extract_fail"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
         sem.release()
@@ -2412,7 +2269,7 @@ async def extract_audio_cb(c: Client, cb: CallbackQuery):
 @catch_errors
 async def forcesub_check_cb(c: Client, cb: CallbackQuery):
     uid  = cb.from_user.id
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     lang = await loop.run_in_executor(None, db_get_lang, uid)
     ok   = await check_force_sub(c, uid)
     if ok:
@@ -2433,7 +2290,7 @@ async def inline_handler(c: Client, iq):
     if not query:
         await iq.answer([], cache_time=300); return
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     lang = await loop.run_in_executor(None, db_get_lang, iq.from_user.id)
 
     info = media_cache.get(query)
@@ -2499,7 +2356,7 @@ def _admin_kb():
 @app.on_message(filters.command("getcode") & admin_f)
 @catch_errors
 async def getcode_cmd(c: Client, m: Message):
-    await m.reply_document(__file__, caption=Path(__file__).name, quote=True)
+    await m.reply_document(__file__, caption=Path(__file__).name)
 
 @app.on_message(filters.command("admin") & admin_f)
 @catch_errors
@@ -2507,7 +2364,7 @@ async def admin_cmd(c: Client, m: Message):
     total, at, aw, dt, dtotal = db_stats()
     text = (f"Admin panel\n\n👤 Jami: {total}\n🔥 Bugun: {at}\n"
             f"📅 Hafta: {aw}\n⬇️ Bugun dl: {dt}\n📦 Jami dl: {dtotal}")
-    await m.reply_text(text, reply_markup=_admin_kb(), quote=True)
+    await m.reply_text(text, reply_markup=_admin_kb())
 
 @app.on_callback_query(filters.regex(r"^adm_") & admin_f)
 @catch_errors
@@ -2620,11 +2477,11 @@ async def admin_cb(c: Client, cb: CallbackQuery):
 @catch_errors
 async def broadcast_cmd(c: Client, m: Message):
     if len(m.command) < 3:
-        await m.reply_text("Ishlatish: /broadcast <all|uz|ru|en|tr> <matn>", quote=True); return
+        await m.reply_text("Ishlatish: /broadcast <all|uz|ru|en|tr> <matn>"); return
     target_lang = m.command[1].lower()
     text        = " ".join(m.command[2:])
     if target_lang not in {"all","uz","ru","en","tr"}:
-        await m.reply_text("Til: all, uz, ru, en, tr", quote=True); return
+        await m.reply_text("Til: all, uz, ru, en, tr"); return
     conn = _db_conn(); cur = conn.cursor()
     if target_lang == "all":
         cur.execute("SELECT user_id FROM users WHERE is_banned=0")
@@ -2641,37 +2498,37 @@ async def broadcast_cmd(c: Client, m: Message):
             try: await c.send_message(uid, text); ok += 1
             except: fail += 1
         except: fail += 1
-    await m.reply_text(f"📢 Yuborildi: {ok}/{len(users)}\n❌ Xato: {fail}\n🌐 Til: {target_lang}", quote=True)
+    await m.reply_text(f"📢 Yuborildi: {ok}/{len(users)}\n❌ Xato: {fail}\n🌐 Til: {target_lang}")
 
 @app.on_message(filters.command("ban") & admin_f)
 @catch_errors
 async def ban_cmd(c: Client, m: Message):
     if len(m.command) < 2:
-        await m.reply_text("/ban user_id", quote=True); return
+        await m.reply_text("/ban user_id"); return
     uid = int(m.command[1])
     with _db_lock:
         conn = _db_conn()
         conn.execute("UPDATE users SET is_banned=1 WHERE user_id=?", (uid,))
         conn.commit()
-    await m.reply_text(f"🚫 banned: {uid}", quote=True)
+    await m.reply_text(f"🚫 banned: {uid}")
 
 @app.on_message(filters.command("unban") & admin_f)
 @catch_errors
 async def unban_cmd(c: Client, m: Message):
     if len(m.command) < 2:
-        await m.reply_text("/unban user_id", quote=True); return
+        await m.reply_text("/unban user_id"); return
     uid = int(m.command[1])
     with _db_lock:
         conn = _db_conn()
         conn.execute("UPDATE users SET is_banned=0 WHERE user_id=?", (uid,))
         conn.commit()
-    await m.reply_text(f"✅ unbanned: {uid}", quote=True)
+    await m.reply_text(f"✅ unbanned: {uid}")
 
 @app.on_message(filters.command("user_info") & admin_f)
 @catch_errors
 async def user_info_cmd(c: Client, m: Message):
     if len(m.command) < 2:
-        await m.reply_text("/user_info user_id", quote=True); return
+        await m.reply_text("/user_info user_id"); return
     uid  = int(m.command[1])
     conn = _db_conn(); cur = conn.cursor()
     cur.execute("SELECT user_id,username,first_name,lang,joined_at,last_active,downloads,is_banned FROM users WHERE user_id=?", (uid,))
@@ -2679,7 +2536,7 @@ async def user_info_cmd(c: Client, m: Message):
     cur.execute("SELECT url,platform,status,created_at FROM downloads WHERE user_id=? ORDER BY id DESC LIMIT 5", (uid,))
     dls = cur.fetchall()
     if not u:
-        await m.reply_text("topilmadi", quote=True); return
+        await m.reply_text("topilmadi"); return
     text = (f"👤 {u[0]}\n@{u[1] or '-'} {u[2] or ''}\n"
             f"🌐 {u[3]}\n📅 {u[4]}\n⏱ {u[5]}\n"
             f"⬇️ {u[6]}\n🚫 {'ha' if u[7] else 'yoq'}\n\nOxirgi 5:\n")
@@ -2688,34 +2545,34 @@ async def user_info_cmd(c: Client, m: Message):
         InlineKeyboardButton("🚫 Ban" if not u[7] else "✅ Unban",
             callback_data=f"adm_ban_{uid}" if not u[7] else f"adm_unban_{uid}")
     ]])
-    await m.reply_text(text, reply_markup=kb, quote=True)
+    await m.reply_text(text, reply_markup=kb)
 
 @app.on_message(filters.command("setchannel") & admin_f)
 @catch_errors
 async def setchannel_cmd(c: Client, m: Message):
     if len(m.command) < 2:
-        await m.reply_text("/setchannel @kanal | -@kanal | list | off", quote=True); return
+        await m.reply_text("/setchannel @kanal | -@kanal | list | off"); return
     val  = m.command[1].lower()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     if val == "off":
         with _db_lock:
             conn = _db_conn()
             conn.execute("DELETE FROM force_sub_channels")
             conn.commit()
-        await m.reply_text("Barcha force sub kanallari ochirildi", quote=True)
+        await m.reply_text("Barcha force sub kanallari ochirildi")
     elif val == "list":
         channels = await loop.run_in_executor(None, db_get_force_channels)
         text = "Kanallar:\n" + "\n".join(channels) if channels else "Force sub ochilgan"
-        await m.reply_text(text, quote=True)
+        await m.reply_text(text)
     elif val.startswith("-"):
         ch = val[1:] if val[1:].startswith("@") else "@" + val[1:]
         await loop.run_in_executor(None, db_remove_force_channel, ch)
-        await m.reply_text(f"Ochirildi: {ch}", quote=True)
+        await m.reply_text(f"Ochirildi: {ch}")
     else:
         ch = val if val.startswith("@") else "@" + val
         await loop.run_in_executor(None, db_add_force_channel, ch)
         channels = await loop.run_in_executor(None, db_get_force_channels)
-        await m.reply_text(f"Qoshildi: {ch}\nJami: {len(channels)} ta", quote=True)
+        await m.reply_text(f"Qoshildi: {ch}\nJami: {len(channels)} ta")
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
@@ -2743,6 +2600,6 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        app.run(main())
+        app.loop.run_until_complete(main())
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt — chiqilmoqda")
